@@ -11,8 +11,13 @@ MINF = torch.log(torch.tensor(0.))
 
 
 class EditDistBase(nn.Module):
-    def __init__(self, ar_vocab, en_vocab):
+    def __init__(self, ar_vocab, en_vocab, start_symbol, end_symbol):
         super(EditDistBase, self).__init__()
+
+        self.ar_bos = ar_vocab[start_symbol]
+        self.ar_eos = ar_vocab[end_symbol]
+        self.en_bos = en_vocab[start_symbol]
+        self.en_eos = en_vocab[end_symbol]
 
         self.ar_symbol_count = len(ar_vocab)
         self.en_symbol_count = len(en_vocab)
@@ -23,11 +28,19 @@ class EditDistBase(nn.Module):
             self.en_symbol_count + # insert english
             self.ar_symbol_count * self.en_symbol_count) # substitute
 
+    @property
+    def insertion_start(self):
+        return 1 + self.ar_symbol_count
+
+    @property
+    def insertion_end(self):
+        return 1 + self.ar_symbol_count + self.en_symbol_count
+
     def _deletion_id(self, ar_char):
         return 1 + ar_char
 
     def _insertion_id(self, en_char):
-        return 1 + self.ar_symbol_count + en_char
+        return self.insertion_start + en_char
 
     def _substitute_id(self, ar_char, en_char):
         subs_id = (1 + self.ar_symbol_count + self.en_symbol_count +
@@ -35,13 +48,21 @@ class EditDistBase(nn.Module):
         assert subs_id < self.n_target_classes
         return subs_id
 
+    def _subsitute_start_and_end(self, ar_char):
+        return (
+            self.insertion_end + self.en_symbol_count * ar_char,
+            self.insertion_end + self.en_symbol_count * (ar_char + 1))
+
 
 class EditDistNeuralModel(EditDistBase):
-    def __init__(self, ar_vocab, en_vocab):
-        super(EditDistNeuralModel, self).__init__(ar_vocab, en_vocab)
+    def __init__(self, ar_vocab, en_vocab, directed=False,
+                 start_symbol="<s>", end_symbol="</s>"):
+        super(EditDistNeuralModel, self).__init__(
+            ar_vocab, en_vocab, start_symbol, end_symbol)
 
+        self.directed = directed
         self.ar_encoder = self._encoder_for_vocab(ar_vocab)
-        self.en_encoder = self._encoder_for_vocab(en_vocab)
+        self.en_encoder = self._encoder_for_vocab(en_vocab, directed=directed)
 
         self.scorer = nn.Sequential(
             nn.Dropout(0.1),
@@ -50,10 +71,10 @@ class EditDistNeuralModel(EditDistBase):
             nn.ReLU(),
             nn.Linear(64, self.n_target_classes))
 
-
-    def _encoder_for_vocab(self, vocab):
+    def _encoder_for_vocab(self, vocab, directed=False):
         config = BertConfig(
             vocab_size=len(vocab),
+            is_decoder=directed,
             hidden_size=64,
             num_hidden_layers=1,
             num_attention_heads=4,
@@ -65,10 +86,14 @@ class EditDistNeuralModel(EditDistBase):
         return BertModel(config)
 
 
-    def _action_scores(self, ar_sent, en_sent):
+    def _action_scores(self, ar_sent, en_sent, inference=False):
         ar_len, en_len = ar_sent.size(1), en_sent.size(1)
         ar_vectors = self.ar_encoder(ar_sent)[0]
         en_vectors = self.en_encoder(en_sent)[0]
+
+        if self.directed and not inference:
+            en_vectors = torch.cat([
+                torch.zeros_like(en_vectors)[:, :1], en_vectors[:, 1:]], dim=1)
 
         # TODO when batched, we will need an extra dimension for batch
         feature_table = torch.cat((
@@ -209,6 +234,71 @@ class EditDistNeuralModel(EditDistBase):
                     action_count[t, v] = best_action_count
 
         return torch.exp(alpha[-1, -1] / action_count[-1, -1])
+
+    def decode(self, ar_sent):
+        en_sent = torch.tensor([[self.en_bos]])
+        ar_len, en_len, action_scores = self._action_scores(
+            ar_sent, en_sent, inference=False)
+
+        # fist target symbol must be <s>
+        alpha = torch.zeros((ar_len, 1))
+        for t, ar_char in enumerate(ar_sent[0]):
+            if t == 0:
+                alpha[0, 0] = 0.
+                continue
+
+            deletion_id = self._deletion_id(ar_char)
+            alpha[t, 0] = action_scores[t, 0, deletion_id] + alpha[t - 1][0]
+
+        for v in range(1, 2 * ar_sent.size(1)):
+            ar_len, en_len, action_scores = self._action_scores(
+                ar_sent, en_sent, inference=True)
+
+            # now consider only insertions and deletions, i.e., only how a new
+            # symbol can appear
+            distributions = []
+            for t, ar_char in enumerate(ar_sent[0]):
+                insertion_distribution = (
+                        action_scores[t, v - 1, self.insertion_start:self.insertion_end]
+                        + alpha[t, v - 1])
+                distributions.append(insertion_distribution)
+
+                if t >= 1:
+                    subs_from, subs_to = self._subsitute_start_and_end(ar_char)
+                    substitute_distribution = (
+                        action_scores[t, v - 1, subs_from:subs_to]
+                        + alpha[t - 1][v - 1])
+                    distributions.append(substitute_distribution)
+
+            # decide what the next symbol will be
+            best_symbol_scores, best_symbols = torch.max(torch.stack(distributions), 1)
+            next_symbol = best_symbols[best_symbol_scores.argmax()]
+
+            # recompute alpha while knowing what the symbol is
+            alpha = torch.cat((alpha, torch.zeros(ar_len, 1) + MINF), dim=1)
+            for t, ar_char in enumerate(ar_sent[0]):
+                deletion_id = self._deletion_id(ar_char)
+                insertion_id = self._insertion_id(next_symbol)
+                subsitute_id = self._substitute_id(ar_char, next_symbol)
+
+                to_sum = []
+                to_sum.append(action_scores[t, v - 1, insertion_id] + alpha[t][v - 1])
+                if t >= 1:
+                    to_sum.append(action_scores[t, v - 1, deletion_id] + alpha[t - 1][v])
+                    to_sum.append(action_scores[t, v - 1, subsitute_id] + alpha[t - 1][v - 1])
+
+                if len(to_sum) == 1:
+                    alpha[t, v] = to_sum[0]
+                else:
+                    alpha[t, v] = torch.stack(to_sum).logsumexp(0)
+
+            # expand the target sequence
+            en_sent = torch.cat(
+                (en_sent, next_symbol.unsqueeze(0).unsqueeze(0)), dim=1)
+            if next_symbol == self.en_eos:
+                break
+
+        return en_sent
 
 
 class EditDistStatModel(EditDistBase):
