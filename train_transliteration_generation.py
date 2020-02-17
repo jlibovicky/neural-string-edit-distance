@@ -32,7 +32,8 @@ def main():
         (train_data, val_data, test_data), batch_sizes=(1, 1, 1),
         shuffle=True, device=0, sort_key=lambda x: len(x.ar))
 
-    neural_model = EditDistNeuralModel(ar_text_field.vocab, en_text_field.vocab, directed=True)
+    neural_model = EditDistNeuralModel(
+        ar_text_field.vocab, en_text_field.vocab, directed=True)
 
     loss_function = nn.KLDivLoss(reduction='batchmean')
     optimizer = optim.Adam(neural_model.parameters())
@@ -66,17 +67,23 @@ def main():
 
                     with torch.no_grad():
                         print()
-                        src_string = "".join([ar_text_field.vocab.itos[c] for c in val_ex.ar[0]])
-                        tgt_string = "".join([en_text_field.vocab.itos[c] for c in val_ex.en[0]])
+                        src_string = "".join(
+                            [ar_text_field.vocab.itos[c] for c in val_ex.ar[0]])
+                        tgt_string = "".join(
+                            [en_text_field.vocab.itos[c] for c in val_ex.en[0]])
                         decoded_val = neural_model.decode(val_ex.ar)
-                        hypothesis = "".join(en_text_field.vocab.itos[c] for c in decoded_val[0])
+                        hypothesis = "".join(
+                            en_text_field.vocab.itos[c] for c in decoded_val[0])
 
-                        correct_probability = neural_model.viterbi(val_ex.ar, val_ex.en)
-                        decoded_probability = neural_model.viterbi(val_ex.ar, decoded_val)
+                        correct_probability = neural_model.viterbi(
+                            val_ex.ar, val_ex.en)
+                        decoded_probability = neural_model.viterbi(
+                            val_ex.ar, decoded_val)
 
                         print(f"{src_string} -> {hypothesis} ({tgt_string})")
-                        print(f"  hyp. prob.: {decoded_probability:.3f}, correct prob.: {correct_probability:.3f}, ratio: {decoded_probability / correct_probability:.3f}")
-
+                        print(f"  hyp. prob.: {decoded_probability:.3f}, "
+                              f"correct prob.: {correct_probability:.3f}, "
+                              f"ratio: {decoded_probability / correct_probability:.3f}")
 
                     if j == 10:
                         break

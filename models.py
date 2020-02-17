@@ -23,10 +23,10 @@ class EditDistBase(nn.Module):
         self.en_symbol_count = len(en_vocab)
 
         self.n_target_classes = (
-            1 + # special termination symbol
-            self.ar_symbol_count + # delete arabic
-            self.en_symbol_count + # insert english
-            self.ar_symbol_count * self.en_symbol_count) # substitute
+            1 +  # special termination symbol
+            self.ar_symbol_count +  # delete arabic
+            self.en_symbol_count +  # insert english
+            self.ar_symbol_count * self.en_symbol_count)  # substitute
 
     @property
     def insertion_start(self):
@@ -44,7 +44,7 @@ class EditDistBase(nn.Module):
 
     def _substitute_id(self, ar_char, en_char):
         subs_id = (1 + self.ar_symbol_count + self.en_symbol_count +
-                self.en_symbol_count * ar_char + en_char)
+                   self.en_symbol_count * ar_char + en_char)
         assert subs_id < self.n_target_classes
         return subs_id
 
@@ -85,7 +85,6 @@ class EditDistNeuralModel(EditDistBase):
 
         return BertModel(config)
 
-
     def _action_scores(self, ar_sent, en_sent, inference=False):
         ar_len, en_len = ar_sent.size(1), en_sent.size(1)
         ar_vectors = self.ar_encoder(ar_sent)[0]
@@ -102,7 +101,6 @@ class EditDistNeuralModel(EditDistBase):
         action_scores = F.log_softmax(self.scorer(feature_table), dim=2)
 
         return ar_len, en_len, action_scores
-
 
     def _forward_evaluation(self, ar_sent, en_sent, action_scores):
         plausible_deletions = torch.zeros_like(action_scores) + MINF
@@ -127,11 +125,14 @@ class EditDistNeuralModel(EditDistBase):
 
                 to_sum = []
                 if v >= 1:
-                    to_sum.append(action_scores[t, v, insertion_id] + alpha[t][v - 1])
+                    to_sum.append(
+                        action_scores[t, v, insertion_id] + alpha[t][v - 1])
                 if t >= 1:
-                    to_sum.append(action_scores[t, v, deletion_id] + alpha[t - 1][v])
+                    to_sum.append(
+                        action_scores[t, v, deletion_id] + alpha[t - 1][v])
                 if v >= 1 and t >= 1:
-                    to_sum.append(action_scores[t, v, subsitute_id] + alpha[t - 1][v - 1])
+                    to_sum.append(
+                        action_scores[t, v, subsitute_id] + alpha[t - 1][v - 1])
 
                 if not to_sum:
                     alpha[t].append(MINF)
@@ -148,7 +149,7 @@ class EditDistNeuralModel(EditDistBase):
         action_entropy = -(action_scores * action_scores.exp()).sum()
 
         alpha, plausible_deletions, plausible_insertions, plausible_substitutions = self._forward_evaluation(
-                ar_sent, en_sent, action_scores)
+            ar_sent, en_sent, action_scores)
 
         with torch.no_grad():
             beta = torch.zeros((ar_len, en_len)) + torch.log(torch.tensor(0.))
@@ -162,7 +163,8 @@ class EditDistNeuralModel(EditDistBase):
 
                     to_sum = [beta[t, v]]
                     if v < en_len - 1:
-                        to_sum.append(action_scores[t, v + 1, insertion_id] + beta[t, v + 1])
+                        to_sum.append(
+                            action_scores[t, v + 1, insertion_id] + beta[t, v + 1])
                     if t < ar_len - 1:
                         to_sum.append(
                             action_scores[t + 1, v, deletion_id] + beta[t + 1, v])
@@ -259,8 +261,9 @@ class EditDistNeuralModel(EditDistBase):
             distributions = []
             for t, ar_char in enumerate(ar_sent[0]):
                 insertion_distribution = (
-                        action_scores[t, v - 1, self.insertion_start:self.insertion_end]
-                        + alpha[t, v - 1])
+                    action_scores[t, v - 1,
+                                  self.insertion_start:self.insertion_end]
+                    + alpha[t, v - 1])
                 distributions.append(insertion_distribution)
 
                 if t >= 1:
@@ -271,7 +274,8 @@ class EditDistNeuralModel(EditDistBase):
                     distributions.append(substitute_distribution)
 
             # decide what the next symbol will be
-            best_symbol_scores, best_symbols = torch.max(torch.stack(distributions), 1)
+            best_symbol_scores, best_symbols = torch.max(
+                torch.stack(distributions), 1)
             next_symbol = best_symbols[best_symbol_scores.argmax()]
 
             # recompute alpha while knowing what the symbol is
@@ -282,10 +286,13 @@ class EditDistNeuralModel(EditDistBase):
                 subsitute_id = self._substitute_id(ar_char, next_symbol)
 
                 to_sum = []
-                to_sum.append(action_scores[t, v - 1, insertion_id] + alpha[t][v - 1])
+                to_sum.append(
+                    action_scores[t, v - 1, insertion_id] + alpha[t][v - 1])
                 if t >= 1:
-                    to_sum.append(action_scores[t, v - 1, deletion_id] + alpha[t - 1][v])
-                    to_sum.append(action_scores[t, v - 1, subsitute_id] + alpha[t - 1][v - 1])
+                    to_sum.append(
+                        action_scores[t, v - 1, deletion_id] + alpha[t - 1][v])
+                    to_sum.append(
+                        action_scores[t, v - 1, subsitute_id] + alpha[t - 1][v - 1])
 
                 if len(to_sum) == 1:
                     alpha[t, v] = to_sum[0]
@@ -337,7 +344,8 @@ class EditDistStatModel(EditDistBase):
                 if t >= 1:
                     to_sum.append(self.weights[deletion_id] + alpha[t - 1, v])
                 if v >= 1 and t >= 1:
-                    to_sum.append(self.weights[subsitute_id] + alpha[t - 1, v - 1])
+                    to_sum.append(
+                        self.weights[subsitute_id] + alpha[t - 1, v - 1])
 
                 alpha[t, v] = torch.logsumexp(torch.tensor(to_sum), dim=0)
 
@@ -427,7 +435,8 @@ class EditDistStatModel(EditDistBase):
         return torch.exp(alpha[-1, -1] / action_count[-1, -1])
 
     def maximize_expectation(self, expectations):
-        epsilon = torch.log(torch.tensor(1e-16)) + torch.zeros_like(self.weights)
+        epsilon = torch.log(torch.tensor(1e-16)) + \
+            torch.zeros_like(self.weights)
         expecation_sum = torch.stack([epsilon] + expectations).logsumexp(0)
         distribution = (
             expecation_sum - expecation_sum.logsumexp(0, keepdim=True))
