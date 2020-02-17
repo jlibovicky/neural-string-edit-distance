@@ -88,11 +88,11 @@ class EditDistNeuralModel(EditDistBase):
     def _action_scores(self, ar_sent, en_sent, inference=False):
         ar_len, en_len = ar_sent.size(1), en_sent.size(1)
         ar_vectors = self.ar_encoder(ar_sent)[0]
-        en_vectors = self.en_encoder(en_sent)[0]
 
         if self.directed and not inference:
-            en_vectors = torch.cat([
-                torch.zeros_like(en_vectors)[:, :1], en_vectors[:, 1:]], dim=1)
+            en_sent = torch.cat([
+                torch.zeros_like(en_sent)[:, :1], en_sent[:, :-1]], dim=1)
+        en_vectors = self.en_encoder(en_sent)[0]
 
         # TODO when batched, we will need an extra dimension for batch
         feature_table = torch.cat((
