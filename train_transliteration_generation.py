@@ -13,6 +13,8 @@ from models import EditDistStatModel, EditDistNeuralModel
 def main():
     parser = argparse.ArgumentParser(__doc__)
     parser.add_argument("data_prefix", type=str)
+    parser.add_argument("--em-loss", default=False, action="store_true")
+    parser.add_argument("--nll-loss", default=False, action="store_true")
     args = parser.parse_args()
 
     ar_text_field = data.Field(
@@ -35,7 +37,8 @@ def main():
     neural_model = EditDistNeuralModel(
         ar_text_field.vocab, en_text_field.vocab, directed=True)
 
-    loss_function = nn.KLDivLoss(reduction='batchmean')
+    kl_div = nn.KLDivLoss(reduction='batchmean')
+    nll = nn.NLLLoss()
     optimizer = optim.Adam(neural_model.parameters())
 
     en_examples = []
@@ -45,14 +48,27 @@ def main():
         for i, train_ex in enumerate(train_iter):
             pos_examples += 1
 
-            action_scores, expected_counts, action_entropy, logprob = neural_model(
+            (action_scores, expected_counts, action_entropy,
+                logprob, tgt_dist) = neural_model(
                 train_ex.ar, train_ex.en)
 
-            loss = loss_function(action_scores, expected_counts)
+            kl_loss = torch.tensor(0.)
+            if args.em_loss:
+                kl_loss = kl_div(action_scores, expected_counts)
+            nll_loss = torch.tensor(0.)
+
+            if args.nll_loss:
+                for en_char, distributions in zip(train_ex.en[0], tgt_dist):
+                    if not distributions:
+                        continue
+                    dist_tensor = torch.stack(distributions)
+                    tgt_tiled = en_char.unsqueeze(0).repeat(dist_tensor.size(0))
+                    nll_loss += nll(dist_tensor, tgt_tiled)
+            loss = kl_loss + nll_loss
             loss.backward()
 
             if pos_examples % 50 == 49:
-                print(f"train loss = {loss.cpu():.10g}")
+                print(f"train loss = {loss:.3g} (NLL {nll_loss:.3g}, EM: {kl_loss:.3g})")
                 optimizer.step()
                 optimizer.zero_grad()
 

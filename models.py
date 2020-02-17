@@ -103,9 +103,12 @@ class EditDistNeuralModel(EditDistBase):
         return ar_len, en_len, action_scores
 
     def _forward_evaluation(self, ar_sent, en_sent, action_scores):
+        """Differentiable forward pass through the model."""
         plausible_deletions = torch.zeros_like(action_scores) + MINF
         plausible_insertions = torch.zeros_like(action_scores) + MINF
         plausible_substitutions = torch.zeros_like(action_scores) + MINF
+
+        tgt_symb_distributions = [[] for _ in en_sent[0]]
 
         alpha = []
         for t, ar_char in enumerate(ar_sent[0]):
@@ -124,15 +127,20 @@ class EditDistNeuralModel(EditDistBase):
                 plausible_substitutions[t, v, subsitute_id] = 0
 
                 to_sum = []
-                if v >= 1:
+                if v >= 1:  # INSERTION
                     to_sum.append(
                         action_scores[t, v, insertion_id] + alpha[t][v - 1])
-                if t >= 1:
+                    tgt_symb_distributions[v].append(
+                        action_scores[t, v, self.insertion_start:self.insertion_end])
+                if t >= 1:  # DELETION
                     to_sum.append(
                         action_scores[t, v, deletion_id] + alpha[t - 1][v])
-                if v >= 1 and t >= 1:
+                if v >= 1 and t >= 1:  # SUBSTITUTION
                     to_sum.append(
                         action_scores[t, v, subsitute_id] + alpha[t - 1][v - 1])
+                    subs_from, subs_to = self._subsitute_start_and_end(ar_char)
+                    tgt_symb_distributions[v].append(
+                        action_scores[t, v, subs_from:subs_to])
 
                 if not to_sum:
                     alpha[t].append(MINF)
@@ -142,15 +150,23 @@ class EditDistNeuralModel(EditDistBase):
                     alpha[t].append(torch.stack(to_sum).logsumexp(0))
 
         alpha_tensor = torch.stack([torch.stack(v) for v in alpha])
-        return (alpha_tensor, plausible_deletions, plausible_insertions, plausible_substitutions)
+        return (
+            alpha_tensor,
+            plausible_deletions,
+            plausible_insertions,
+            plausible_substitutions,
+            tgt_symb_distributions)
 
     def forward(self, ar_sent, en_sent):
         ar_len, en_len, action_scores = self._action_scores(ar_sent, en_sent)
         action_entropy = -(action_scores * action_scores.exp()).sum()
 
-        alpha, plausible_deletions, plausible_insertions, plausible_substitutions = self._forward_evaluation(
+        (alpha, plausible_deletions, plausible_insertions,
+         plausible_substitutions, tgt_symb_distributions) = self._forward_evaluation(
             ar_sent, en_sent, action_scores)
 
+        # This is the backward pass through the edit distance table.
+        # Unlike, the forward pass it does not have to be differentiable.
         with torch.no_grad():
             beta = torch.zeros((ar_len, en_len)) + torch.log(torch.tensor(0.))
             beta[-1, -1] = 0.0
@@ -196,7 +212,8 @@ class EditDistNeuralModel(EditDistBase):
                 expected_deletions, expected_insertions, expected_substitutions]).logsumexp(0)
             expected_counts -= expected_counts.logsumexp(2, keepdim=True)
 
-        return action_scores, torch.exp(expected_counts), action_entropy, alpha[-1, -1]
+        return (action_scores, torch.exp(expected_counts), action_entropy,
+                alpha[-1, -1], tgt_symb_distributions)
 
     def viterbi(self, ar_sent, en_sent):
         ar_len, en_len, action_scores = self._action_scores(ar_sent, en_sent)
