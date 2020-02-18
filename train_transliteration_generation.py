@@ -13,8 +13,8 @@ from models import EditDistStatModel, EditDistNeuralModel
 def main():
     parser = argparse.ArgumentParser(__doc__)
     parser.add_argument("data_prefix", type=str)
-    parser.add_argument("--em-loss", default=False, action="store_true")
-    parser.add_argument("--nll-loss", default=False, action="store_true")
+    parser.add_argument("--em-loss", default=None, type=float)
+    parser.add_argument("--nll-loss", default=None, type=float)
     args = parser.parse_args()
 
     ar_text_field = data.Field(
@@ -49,22 +49,20 @@ def main():
             pos_examples += 1
 
             (action_scores, expected_counts, action_entropy,
-                logprob, tgt_dist) = neural_model(
+                logprob, next_symbol_score) = neural_model(
                 train_ex.ar, train_ex.en)
 
-            kl_loss = torch.tensor(0.)
-            if args.em_loss:
+            loss = torch.tensor(0.)
+            kl_loss = 0
+            if args.em_loss is not None:
                 kl_loss = kl_div(action_scores, expected_counts)
-            nll_loss = torch.tensor(0.)
+                loss += args.em_loss * kl_loss
 
-            if args.nll_loss:
-                for en_char, distributions in zip(train_ex.en[0], tgt_dist):
-                    if not distributions:
-                        continue
-                    dist_tensor = torch.stack(distributions)
-                    tgt_tiled = en_char.unsqueeze(0).repeat(dist_tensor.size(0))
-                    nll_loss += nll(dist_tensor, tgt_tiled)
-            loss = kl_loss + nll_loss
+            nll_loss = 0
+            if args.nll_loss is not None:
+                nll_loss = nll(next_symbol_score[:-1], train_ex.en[0, 1:])
+                loss += args.nll_loss * nll_loss
+
             loss.backward()
 
             if pos_examples % 50 == 49:

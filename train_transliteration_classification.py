@@ -54,7 +54,7 @@ def main():
             continue
         pos_examples += 1
 
-        action_scores, expected_counts, action_entropy, logprob = neural_model(
+        action_scores, expected_counts, action_entropy, logprob, _ = neural_model(
             train_ex.ar.transpose(0, 1), train_ex.en.transpose(0, 1))
         if label == 1:
             exp_counts = stat_model(train_ex.ar, train_ex.en)

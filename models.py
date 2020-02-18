@@ -64,12 +64,15 @@ class EditDistNeuralModel(EditDistBase):
         self.ar_encoder = self._encoder_for_vocab(ar_vocab)
         self.en_encoder = self._encoder_for_vocab(en_vocab, directed=directed)
 
-        self.scorer = nn.Sequential(
+        self.projection = nn.Sequential(
             nn.Dropout(0.1),
             nn.Linear(2 * 64, 64),
             nn.Dropout(0.1),
-            nn.ReLU(),
-            nn.Linear(64, self.n_target_classes))
+            nn.ReLU())
+        self.action_projection = nn.Linear(64, self.n_target_classes)
+
+        if self.directed:
+            self.output_symbol_projection = nn.Linear(64, len(en_vocab))
 
     def _encoder_for_vocab(self, vocab, directed=False):
         config = BertConfig(
@@ -86,29 +89,35 @@ class EditDistNeuralModel(EditDistBase):
         return BertModel(config)
 
     def _action_scores(self, ar_sent, en_sent, inference=False):
+        # TODO masking when batched
         ar_len, en_len = ar_sent.size(1), en_sent.size(1)
         ar_vectors = self.ar_encoder(ar_sent)[0]
 
-        if self.directed and not inference:
-            en_sent = torch.cat([
-                torch.zeros_like(en_sent)[:, :1], en_sent[:, :-1]], dim=1)
-        en_vectors = self.en_encoder(en_sent)[0]
+        if self.directed:
+            en_vectors = self.en_encoder(
+                en_sent, encoder_hidden_states=ar_vectors)[0]
+        else:
+            en_vectors = self.en_encoder(en_sent)[0]
 
         # TODO when batched, we will need an extra dimension for batch
-        feature_table = torch.cat((
+        feature_table = self.projection(torch.cat((
             ar_vectors.transpose(0, 1).repeat(1, en_len, 1),
-            en_vectors.repeat(ar_len, 1, 1)), dim=2)
-        action_scores = F.log_softmax(self.scorer(feature_table), dim=2)
+            en_vectors.repeat(ar_len, 1, 1)), dim=2))
+        action_scores = F.log_softmax(self.action_projection(feature_table), dim=2)
 
-        return ar_len, en_len, action_scores
+        return ar_len, en_len, feature_table, action_scores
+
+    def _symbol_prediction(self, feature_table, alpha):
+        alpha_distributions = (alpha - alpha.logsumexp(1, keepdim=True)).exp()
+        context_vector = (alpha_distributions.unsqueeze(2) * feature_table).sum(1)
+
+        return F.log_softmax(self.output_symbol_projection(feature_table.mean(0)), dim=1)
 
     def _forward_evaluation(self, ar_sent, en_sent, action_scores):
         """Differentiable forward pass through the model."""
         plausible_deletions = torch.zeros_like(action_scores) + MINF
         plausible_insertions = torch.zeros_like(action_scores) + MINF
         plausible_substitutions = torch.zeros_like(action_scores) + MINF
-
-        tgt_symb_distributions = [[] for _ in en_sent[0]]
 
         alpha = []
         for t, ar_char in enumerate(ar_sent[0]):
@@ -130,8 +139,6 @@ class EditDistNeuralModel(EditDistBase):
                 if v >= 1:  # INSERTION
                     to_sum.append(
                         action_scores[t, v, insertion_id] + alpha[t][v - 1])
-                    tgt_symb_distributions[v].append(
-                        action_scores[t, v, self.insertion_start:self.insertion_end])
                 if t >= 1:  # DELETION
                     to_sum.append(
                         action_scores[t, v, deletion_id] + alpha[t - 1][v])
@@ -139,8 +146,6 @@ class EditDistNeuralModel(EditDistBase):
                     to_sum.append(
                         action_scores[t, v, subsitute_id] + alpha[t - 1][v - 1])
                     subs_from, subs_to = self._subsitute_start_and_end(ar_char)
-                    tgt_symb_distributions[v].append(
-                        action_scores[t, v, subs_from:subs_to])
 
                 if not to_sum:
                     alpha[t].append(MINF)
@@ -154,16 +159,16 @@ class EditDistNeuralModel(EditDistBase):
             alpha_tensor,
             plausible_deletions,
             plausible_insertions,
-            plausible_substitutions,
-            tgt_symb_distributions)
+            plausible_substitutions)
 
     def forward(self, ar_sent, en_sent):
-        ar_len, en_len, action_scores = self._action_scores(ar_sent, en_sent)
+        ar_len, en_len, feature_table, action_scores = self._action_scores(ar_sent, en_sent)
         action_entropy = -(action_scores * action_scores.exp()).sum()
 
         (alpha, plausible_deletions, plausible_insertions,
-         plausible_substitutions, tgt_symb_distributions) = self._forward_evaluation(
+         plausible_substitutions) = self._forward_evaluation(
             ar_sent, en_sent, action_scores)
+
 
         # This is the backward pass through the edit distance table.
         # Unlike, the forward pass it does not have to be differentiable.
@@ -212,11 +217,15 @@ class EditDistNeuralModel(EditDistBase):
                 expected_deletions, expected_insertions, expected_substitutions]).logsumexp(0)
             expected_counts -= expected_counts.logsumexp(2, keepdim=True)
 
+        next_symbol_scores = None
+        if self.directed:
+            next_symbol_scores = self._symbol_prediction(feature_table, alpha)
+
         return (action_scores, torch.exp(expected_counts), action_entropy,
-                alpha[-1, -1], tgt_symb_distributions)
+                alpha[-1, -1], next_symbol_scores)
 
     def viterbi(self, ar_sent, en_sent):
-        ar_len, en_len, action_scores = self._action_scores(ar_sent, en_sent)
+        ar_len, en_len, _, action_scores = self._action_scores(ar_sent, en_sent)
 
         with torch.no_grad():
             action_count = torch.zeros((ar_len, en_len))
@@ -256,58 +265,37 @@ class EditDistNeuralModel(EditDistBase):
 
     def decode(self, ar_sent):
         en_sent = torch.tensor([[self.en_bos]])
-        ar_len, en_len, action_scores = self._action_scores(
+        ar_len, en_len, feature_table, action_scores = self._action_scores(
             ar_sent, en_sent, inference=False)
 
-        # fist target symbol must be <s>
-        alpha = torch.zeros((ar_len, 1))
-        for t, ar_char in enumerate(ar_sent[0]):
-            if t == 0:
-                alpha[0, 0] = 0.
-                continue
+        alpha = None
+        for v in range(2 * ar_sent.size(1)):
+            if alpha is None:
+                alpha = torch.zeros((ar_len, 1))
+            else:
+                alpha = torch.cat((alpha, torch.zeros(ar_len, 1) + MINF), dim=1)
 
-            deletion_id = self._deletion_id(ar_char)
-            alpha[t, 0] = action_scores[t, 0, deletion_id] + alpha[t - 1][0]
 
-        for v in range(1, 2 * ar_sent.size(1)):
-            ar_len, en_len, action_scores = self._action_scores(
+            ar_len, en_len, feature_table, action_scores = self._action_scores(
                 ar_sent, en_sent, inference=True)
 
-            # now consider only insertions and deletions, i.e., only how a new
-            # symbol can appear
-            distributions = []
             for t, ar_char in enumerate(ar_sent[0]):
-                insertion_distribution = (
-                    action_scores[t, v - 1,
-                                  self.insertion_start:self.insertion_end]
-                    + alpha[t, v - 1])
-                distributions.append(insertion_distribution)
+                if t == 0 and v == 0:
+                    alpha[0, 0] = 0.
+                    continue
 
-                if t >= 1:
-                    subs_from, subs_to = self._subsitute_start_and_end(ar_char)
-                    substitute_distribution = (
-                        action_scores[t, v - 1, subs_from:subs_to]
-                        + alpha[t - 1][v - 1])
-                    distributions.append(substitute_distribution)
-
-            # decide what the next symbol will be
-            best_symbol_scores, best_symbols = torch.max(
-                torch.stack(distributions), 1)
-            next_symbol = best_symbols[best_symbol_scores.argmax()]
-
-            # recompute alpha while knowing what the symbol is
-            alpha = torch.cat((alpha, torch.zeros(ar_len, 1) + MINF), dim=1)
-            for t, ar_char in enumerate(ar_sent[0]):
                 deletion_id = self._deletion_id(ar_char)
-                insertion_id = self._insertion_id(next_symbol)
-                subsitute_id = self._substitute_id(ar_char, next_symbol)
+                insertion_id = self._insertion_id(en_sent[0, v])
+                subsitute_id = self._substitute_id(ar_char, en_sent[0, v])
 
                 to_sum = []
-                to_sum.append(
-                    action_scores[t, v - 1, insertion_id] + alpha[t][v - 1])
+                if v >= 1:
+                    to_sum.append(
+                        action_scores[t, v - 1, insertion_id] + alpha[t][v - 1])
                 if t >= 1:
                     to_sum.append(
                         action_scores[t, v - 1, deletion_id] + alpha[t - 1][v])
+                if t >= 1 and v >= 1:
                     to_sum.append(
                         action_scores[t, v - 1, subsitute_id] + alpha[t - 1][v - 1])
 
@@ -316,9 +304,13 @@ class EditDistNeuralModel(EditDistBase):
                 else:
                     alpha[t, v] = torch.stack(to_sum).logsumexp(0)
 
+            # decide what the next symbol will be
+            next_symbol_scores = self._symbol_prediction(feature_table[:, -1:], alpha[:, -1:])
+            next_symbol = next_symbol_scores.argmax(1)
+
             # expand the target sequence
             en_sent = torch.cat(
-                (en_sent, next_symbol.unsqueeze(0).unsqueeze(0)), dim=1)
+                (en_sent, next_symbol.unsqueeze(0)), dim=1)
             if next_symbol == self.en_eos:
                 break
 
@@ -326,8 +318,8 @@ class EditDistNeuralModel(EditDistBase):
 
 
 class EditDistStatModel(EditDistBase):
-    def __init__(self, ar_vocab, en_vocab):
-        super(EditDistStatModel, self).__init__(ar_vocab, en_vocab)
+    def __init__(self, ar_vocab, en_vocab, start_symbol="<s>", end_symbol="</s>"):
+        super(EditDistStatModel, self).__init__(ar_vocab, en_vocab, start_symbol, end_symbol)
 
         self.weights = torch.log(torch.tensor(
             [1 / self.n_target_classes for _ in range(self.n_target_classes)]))
