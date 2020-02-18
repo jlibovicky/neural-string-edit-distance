@@ -36,7 +36,8 @@ def main():
         (train_data, val_data, test_data), batch_sizes=(1, 1, 1),
         shuffle=True, device=0, sort_key=lambda x: len(x.ar))
 
-    neural_model = EditDistNeuralModel(ar_text_field.vocab, en_text_field.vocab)
+    neural_model = EditDistNeuralModel(
+        ar_text_field.vocab, en_text_field.vocab)
     stat_model = EditDistStatModel(ar_text_field.vocab, en_text_field.vocab)
 
     loss_function = nn.KLDivLoss(reduction='batchmean')
@@ -84,7 +85,8 @@ def main():
                 stat_false_scores = []
                 stat_true_scores = []
                 for j, val_ex in enumerate(val_iter):
-                    neural_score = neural_model.viterbi(val_ex.ar.transpose(0, 1), val_ex.en.transpose(0, 1))
+                    neural_score = neural_model.viterbi(
+                        val_ex.ar.transpose(0, 1), val_ex.en.transpose(0, 1))
                     stat_score = stat_model.viterbi(val_ex.ar, val_ex.en)
                     if j < 50:
                         if val_ex.labels == true_class_label:
@@ -100,7 +102,6 @@ def main():
                         print(f"stat false scores:   {sum(stat_false_scores) / len(stat_false_scores)}")
                         break
             neural_model.train()
-
 
 
 if __name__ == "__main__":

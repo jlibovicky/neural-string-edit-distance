@@ -103,13 +103,15 @@ class EditDistNeuralModel(EditDistBase):
         feature_table = self.projection(torch.cat((
             ar_vectors.transpose(0, 1).repeat(1, en_len, 1),
             en_vectors.repeat(ar_len, 1, 1)), dim=2))
-        action_scores = F.log_softmax(self.action_projection(feature_table), dim=2)
+        action_scores = F.log_softmax(
+            self.action_projection(feature_table), dim=2)
 
         return ar_len, en_len, feature_table, action_scores
 
     def _symbol_prediction(self, feature_table, alpha):
         alpha_distributions = (alpha - alpha.logsumexp(1, keepdim=True)).exp()
-        context_vector = (alpha_distributions.unsqueeze(2) * feature_table).sum(1)
+        context_vector = (alpha_distributions.unsqueeze(2)
+                          * feature_table).sum(1)
 
         return F.log_softmax(self.output_symbol_projection(feature_table.mean(0)), dim=1)
 
@@ -162,13 +164,13 @@ class EditDistNeuralModel(EditDistBase):
             plausible_substitutions)
 
     def forward(self, ar_sent, en_sent):
-        ar_len, en_len, feature_table, action_scores = self._action_scores(ar_sent, en_sent)
+        ar_len, en_len, feature_table, action_scores = self._action_scores(
+            ar_sent, en_sent)
         action_entropy = -(action_scores * action_scores.exp()).sum()
 
         (alpha, plausible_deletions, plausible_insertions,
          plausible_substitutions) = self._forward_evaluation(
             ar_sent, en_sent, action_scores)
-
 
         # This is the backward pass through the edit distance table.
         # Unlike, the forward pass it does not have to be differentiable.
@@ -225,7 +227,8 @@ class EditDistNeuralModel(EditDistBase):
                 alpha[-1, -1], next_symbol_scores)
 
     def viterbi(self, ar_sent, en_sent):
-        ar_len, en_len, _, action_scores = self._action_scores(ar_sent, en_sent)
+        ar_len, en_len, _, action_scores = self._action_scores(
+            ar_sent, en_sent)
 
         with torch.no_grad():
             action_count = torch.zeros((ar_len, en_len))
@@ -273,8 +276,8 @@ class EditDistNeuralModel(EditDistBase):
             if alpha is None:
                 alpha = torch.zeros((ar_len, 1))
             else:
-                alpha = torch.cat((alpha, torch.zeros(ar_len, 1) + MINF), dim=1)
-
+                alpha = torch.cat(
+                    (alpha, torch.zeros(ar_len, 1) + MINF), dim=1)
 
             ar_len, en_len, feature_table, action_scores = self._action_scores(
                 ar_sent, en_sent, inference=True)
@@ -305,7 +308,8 @@ class EditDistNeuralModel(EditDistBase):
                     alpha[t, v] = torch.stack(to_sum).logsumexp(0)
 
             # decide what the next symbol will be
-            next_symbol_scores = self._symbol_prediction(feature_table[:, -1:], alpha[:, -1:])
+            next_symbol_scores = self._symbol_prediction(
+                feature_table[:, -1:], alpha[:, -1:])
             next_symbol = next_symbol_scores.argmax(1)
 
             # expand the target sequence
@@ -319,7 +323,8 @@ class EditDistNeuralModel(EditDistBase):
 
 class EditDistStatModel(EditDistBase):
     def __init__(self, ar_vocab, en_vocab, start_symbol="<s>", end_symbol="</s>"):
-        super(EditDistStatModel, self).__init__(ar_vocab, en_vocab, start_symbol, end_symbol)
+        super(EditDistStatModel, self).__init__(
+            ar_vocab, en_vocab, start_symbol, end_symbol)
 
         self.weights = torch.log(torch.tensor(
             [1 / self.n_target_classes for _ in range(self.n_target_classes)]))
