@@ -38,6 +38,8 @@ def main():
 
     neural_model = EditDistNeuralModelProgressive(
         ar_text_field.vocab, en_text_field.vocab, directed=True)
+    #neural_model = EditDistNeuralModelConcurrent(
+    #    ar_text_field.vocab, en_text_field.vocab, directed=True)
 
     kl_div = nn.KLDivLoss(reduction='batchmean')
     nll = nn.NLLLoss()
@@ -68,7 +70,9 @@ def main():
             loss.backward()
 
             if pos_examples % 50 == 49:
-                print(f"train loss = {loss:.3g} (NLL {nll_loss:.3g}, EM: {kl_loss:.3g})")
+                print(f"train loss = {loss:.3g} "
+                      f"(NLL {nll_loss:.3g}, "
+                      f"EM: {kl_loss:.3g})")
                 optimizer.step()
                 optimizer.zero_grad()
 
@@ -109,7 +113,7 @@ def main():
                             #       f"correct prob.: {correct_prob:.3f}, "
                             #       f"ratio: {decoded_prob / correct_prob:.3f}")
 
-                        if j >= 500:
+                        if j >= 50:
                             break
 
                 print()
