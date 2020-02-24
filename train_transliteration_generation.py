@@ -2,16 +2,21 @@
 
 import argparse
 
+import logging
 from jiwer import wer
 import torch
 from torch import nn, optim
 from torch.functional import F
 from torchtext import data
+import transformers
 
 from models import (
     EditDistNeuralModelConcurrent, EditDistNeuralModelProgressive)
 from transliteration_utils import (
     load_transliteration_data, decode_ids, char_error_rate)
+
+
+logging.basicConfig(format='%(asctime)s %(message)s', level=logging.INFO)
 
 
 def main():
@@ -25,19 +30,18 @@ def main():
     args = parser.parse_args()
 
     ar_text_field, en_text_field, train_iter, val_iter, test_iter = \
-        load_transliteration_data(args.data_prefix, 1)
+        load_transliteration_data(args.data_prefix, 32)
+    tgt_pad_id = en_text_field.vocab[en_text_field.pad_token]
 
     neural_model = EditDistNeuralModelProgressive(
         ar_text_field.vocab, en_text_field.vocab, directed=True)
     #neural_model = EditDistNeuralModelConcurrent(
     #    ar_text_field.vocab, en_text_field.vocab, directed=True)
 
-    kl_div = nn.KLDivLoss(reduction='batchmean')
-    nll = nn.NLLLoss()
+    kl_div = nn.KLDivLoss(reduction='none')
+    nll = nn.NLLLoss(reduction='none')
     optimizer = optim.Adam(neural_model.parameters())
-    scheduler = transformers.get_linear_schedule_with_warmup(
-        optimizer, num_warmup_steps=4000,
-        num_training_steps=100000)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=20, factor=0.9)
 
     en_examples = []
     ar_examples = []
@@ -47,26 +51,32 @@ def main():
             pos_examples += 1
 
             (action_scores, expected_counts,
-                logprob, next_symbol_score) = neural_model(
+                logprob, next_symbol_score, log_table_mask) = neural_model(
                 train_ex.ar, train_ex.en)
 
+            mask = log_table_mask.exp()
             loss = torch.tensor(0.)
             kl_loss = 0
             if args.em_loss is not None:
-                kl_loss = kl_div(action_scores, expected_counts)
+                kl_loss = (kl_div(action_scores, expected_counts) * mask).sum() / mask.sum()
                 loss += args.em_loss * kl_loss
 
             nll_loss = 0
             if args.nll_loss is not None:
-                nll_loss = nll(next_symbol_score, train_ex.en[0, 1:])
+                tgt_mask = (train_ex.en[:, 1:] != tgt_pad_id).reshape(-1)
+                nll_loss_raw = nll(
+                    next_symbol_score.reshape(-1, next_symbol_score.size(2)),
+                    train_ex.en[:, 1:].reshape(-1))
+                masked_loss = torch.where(tgt_mask, nll_loss_raw, torch.zeros_like(nll_loss_raw))
+                nll_loss = masked_loss.sum() / tgt_mask.float().sum()
                 loss += args.nll_loss * nll_loss
 
             loss.backward()
 
-            if pos_examples % 50 == 49:
-                print(f"train loss = {loss:.3g} "
-                      f"(NLL {nll_loss:.3g}, "
-                      f"EM: {kl_loss:.3g})")
+            if pos_examples % 1 == 0:
+                logging.info(f"train loss = {loss:.3g} "
+                             f"(NLL {nll_loss:.3g}, "
+                             f"EM: {kl_loss:.3g})")
                 optimizer.step()
                 optimizer.zero_grad()
 
@@ -116,6 +126,7 @@ def main():
                 print(f"CER: {cer}")
                 print()
                 neural_model.train()
+                scheduler.step(cer)
 
 
 if __name__ == "__main__":
