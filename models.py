@@ -11,7 +11,8 @@ MINF = torch.log(torch.tensor(0.))
 
 
 class EditDistBase(nn.Module):
-    def __init__(self, ar_vocab, en_vocab, start_symbol, end_symbol, full_table=True):
+    def __init__(self, ar_vocab, en_vocab, start_symbol,
+                 end_symbol, full_table=True):
         super(EditDistBase, self).__init__()
 
         self.ar_bos = ar_vocab[start_symbol]
@@ -65,32 +66,36 @@ class EditDistBase(nn.Module):
 
 class EditDistNeuralModelConcurrent(EditDistBase):
     def __init__(self, ar_vocab, en_vocab, directed=False, full_table=False,
+                 hidden_dim=32, hidden_layers=2, attention_heads=4,
                  start_symbol="<s>", end_symbol="</s>"):
         super(EditDistNeuralModelConcurrent, self).__init__(
             ar_vocab, en_vocab, start_symbol, end_symbol, full_table)
 
         self.directed = directed
+        self.hidden_dim = hidden_dim
+        self.hidden_layers = hidden_layers
+        self.attention_heads = attention_heads
         self.ar_encoder = self._encoder_for_vocab(ar_vocab)
         self.en_encoder = self._encoder_for_vocab(en_vocab, directed=directed)
 
         self.projection = nn.Sequential(
             nn.Dropout(0.1),
-            nn.Linear(2 * 64, 64),
+            nn.Linear(2 * hidden_dim, hidden_dim),
             nn.Dropout(0.1),
             nn.ReLU())
-        self.action_projection = nn.Linear(64, self.n_target_classes)
+        self.action_projection = nn.Linear(hidden_dim, self.n_target_classes)
 
         if self.directed:
-            self.output_symbol_projection = nn.Linear(64, len(en_vocab))
+            self.output_symbol_projection = nn.Linear(hidden_dim, len(en_vocab))
 
     def _encoder_for_vocab(self, vocab, directed=False):
         config = BertConfig(
             vocab_size=len(vocab),
             is_decoder=directed,
-            hidden_size=64,
-            num_hidden_layers=1,
-            num_attention_heads=4,
-            intermediate_size=128,
+            hidden_size=self.hidden_dim,
+            num_hidden_layers=self.hidden_layers,
+            num_attention_heads=self.attention_heads,
+            intermediate_size=2 * self.hidden_dim,
             hidden_act='gelu',
             hidden_dropout_prob=0.1,
             attention_probs_dropout_prob=0.1)
@@ -160,7 +165,6 @@ class EditDistNeuralModelConcurrent(EditDistBase):
         alpha_tensor = torch.stack([torch.stack(v) for v in alpha])
         return alpha_tensor
 
-
     def _backward_evalatuion_and_expectation(
             self, ar_len, en_len, ar_sent, en_sent, alpha, action_scores):
         # This is the backward pass through the edit distance table.
@@ -228,7 +232,8 @@ class EditDistNeuralModelConcurrent(EditDistBase):
 
         next_symbol_scores = None
         if self.directed:
-            next_symbol_scores = self._symbol_prediction(feature_table, alpha)[:-1]
+            next_symbol_scores = self._symbol_prediction(
+                feature_table, alpha)[:-1]
 
         return (action_scores, torch.exp(expected_counts),
                 alpha[-1, -1], next_symbol_scores)
@@ -330,14 +335,17 @@ class EditDistNeuralModelConcurrent(EditDistBase):
 
 class EditDistNeuralModelProgressive(EditDistNeuralModelConcurrent):
     def __init__(self, ar_vocab, en_vocab, directed=False,
+                 hidden_dim=32, hidden_layers=2, attention_heads=4,
                  start_symbol="<s>", end_symbol="</s>"):
         super(EditDistNeuralModelProgressive, self).__init__(
             ar_vocab, en_vocab, directed, full_table=False,
+            hidden_dim=hidden_dim, hidden_layers=hidden_layers,
+            attention_heads=attention_heads,
             start_symbol=start_symbol, end_symbol=end_symbol)
 
-        self.deletion_logit_proj = nn.Linear(64, 1)
-        self.insertion_proj = nn.Linear(64, 64)
-        self.substitution_proj = nn.Linear(64, 64)
+        self.deletion_logit_proj = nn.Linear(self.hidden_dim, 1)
+        self.insertion_proj = nn.Linear(self.hidden_dim, self.hidden_dim)
+        self.substitution_proj = nn.Linear(self.hidden_dim, self.hidden_dim)
 
         self.tgt_embeddings = \
             self.en_encoder.embeddings.word_embeddings.weight.t()
@@ -402,14 +410,13 @@ class EditDistNeuralModelProgressive(EditDistNeuralModelConcurrent):
         expected_counts = self._backward_evalatuion_and_expectation(
             ar_len, en_len, ar_sent, en_sent, alpha, action_scores)
 
-        insertion_log_dist = F.log_softmax(insertion_logits, dim=2)
-            #+ alpha[:, :-1].unsqueeze(2))
-        subs_log_dist = F.log_softmax(subs_logits, dim=2)
-            #+ alpha[:-1, :-1].unsqueeze(2))
+        insertion_log_dist = (F.log_softmax(insertion_logits, dim=2) +
+                              alpha[:, :-1].unsqueeze(2))
+        subs_log_dist = (F.log_softmax(subs_logits, dim=2) +
+                         alpha[:-1, :-1].unsqueeze(2))
 
         next_symbol_logprobs_sum = torch.cat(
             (insertion_log_dist, subs_log_dist), dim=0).logsumexp(0)
-        #next_symbol_logprobs_sum = insertion_log_dist.logsumexp(0)
         next_symbol_logprobs = (
             next_symbol_logprobs_sum -
             next_symbol_logprobs_sum.logsumexp(1, keepdims=True))
@@ -420,7 +427,7 @@ class EditDistNeuralModelProgressive(EditDistNeuralModelConcurrent):
     def decode(self, ar_sent):
         en_sent = torch.tensor([[self.en_bos]])
         (ar_len, en_len, feature_table,
-                action_scores, _, _) = self._action_scores(
+         action_scores, _, _) = self._action_scores(
             ar_sent, en_sent, inference=False)
 
         # special case, v = 0
@@ -436,20 +443,227 @@ class EditDistNeuralModelProgressive(EditDistNeuralModelConcurrent):
             # From what we have, do a prediction what is the next symbol
             insertion_logits = torch.matmul(
                 self.insertion_proj(feature_table[:, v - 1:v]),
-                self.tgt_embeddings) #+ alpha[:, v - 1:v].unsqueeze(2)
+                self.tgt_embeddings)# + alpha[:, v - 1:v].unsqueeze(2)
             # TODO maybe weight by alpha?
 
             subs_logits = torch.matmul(
                 self.substitution_proj(feature_table[1:, v - 1:v]),
-                self.tgt_embeddings) #+ alpha[1:, v - 1:v].unsqueeze(2)
+                self.tgt_embeddings)# + alpha[1:, v - 1:v].unsqueeze(2)
             # TODO maybe weight by alpha?
 
+            # TODO and what about summing them instead of logsumexping?
             next_symb_logits = torch.cat(
                 (insertion_logits, subs_logits), dim=0).logsumexp(0)
-            next_symbol = next_symb_logits.argmax()
+            next_symbol = next_symb_logits.argmax(1)
 
             en_sent = torch.cat(
-                (en_sent, next_symbol.unsqueeze(0).unsqueeze(0)), dim=1)
+                (en_sent, next_symbol.unsqueeze(0)), dim=1)
+
+            ar_len, en_len, feature_table, action_scores, _, _ = self._action_scores(
+                ar_sent, en_sent, inference=True)
+            alpha = torch.cat(
+                (alpha, torch.zeros(ar_len, 1) + MINF), dim=1)
+
+            for t, ar_char in enumerate(ar_sent[0]):
+                deletion_id = self._deletion_id(ar_char)
+                insertion_id = self._insertion_id(en_sent[0, v])
+                subsitute_id = self._substitute_id(ar_char, en_sent[0, v])
+
+                to_sum = [
+                    action_scores[t, v - 1, insertion_id] + alpha[t][v - 1]]
+                if t >= 1:
+                    to_sum.append(
+                        action_scores[t, v - 1, deletion_id] + alpha[t - 1][v])
+                    to_sum.append(
+                        action_scores[t, v - 1, subsitute_id] + alpha[t - 1][v - 1])
+
+                if len(to_sum) == 1:
+                    alpha[t, v] = to_sum[0]
+                else:
+                    alpha[t, v] = torch.stack(to_sum).logsumexp(0)
+
+            # expand the target sequence
+            if next_symbol == self.en_eos:
+                break
+
+        return en_sent
+
+
+class EditDistStatModel(EditDistBase):
+    def __init__(self, ar_vocab, en_vocab, start_symbol="<s>", end_symbol="</s>"):
+        super(EditDistStatModel, self).__init__(
+            ar_vocab, en_vocab, start_symbol, end_symbol)
+
+        self.weights = torch.log(torch.tensor(
+            [1 / self.n_target_classes for _ in range(self.n_target_classes)]))
+
+    def forward(self, ar_sent, en_sent):
+        ar_len, en_len = ar_sent.size(0), en_sent.size(0)
+        table_shape = ((ar_len, en_len, self.n_target_classes))
+
+        plausible_deletions = torch.zeros(table_shape) + MINF
+        plausible_insertions = torch.zeros(table_shape) + MINF
+        plausible_substitutions = torch.zeros(table_shape) + MINF
+
+        alpha = torch.zeros((ar_len, en_len)) + MINF
+        alpha[0, 0] = 0
+        for t, ar_char in enumerate(ar_sent[:, 0]):
+            for v, en_char in enumerate(en_sent[:, 0]):
+                if t == 0 and v == 0:
+                    continue
+
+                deletion_id = self._deletion_id(ar_char)
+                insertion_id = self._insertion_id(en_char)
+                subsitute_id = self._substitute_id(ar_char, en_char)
+
+                plausible_deletions[t, v, deletion_id] = 0
+                plausible_insertions[t, v, insertion_id] = 0
+                plausible_substitutions[t, v, subsitute_id] = 0
+
+                to_sum = [alpha[t, v]]
+                if v >= 1:
+                    to_sum.append(self.weights[insertion_id] + alpha[t, v - 1])
+                if t >= 1:
+                    to_sum.append(self.weights[deletion_id] + alpha[t - 1, v])
+                if v >= 1 and t >= 1:
+                    to_sum.append(
+                        self.weights[subsitute_id] + alpha[t - 1, v - 1])
+
+                alpha[t, v] = torch.logsumexp(torch.tensor(to_sum), dim=0)
+
+        beta = torch.zeros((ar_len, en_len)) + MINF
+        beta[-1, -1] = 0.0
+
+        for t, ar_char in reversed(list(enumerate(ar_sent[:, 0]))):
+            for v, en_char in reversed(list(enumerate(en_sent[:, 0]))):
+                deletion_id = self._deletion_id(ar_char)
+                insertion_id = self._insertion_id(en_char)
+                subsitute_id = self._substitute_id(ar_char, en_char)
+
+                to_sum = [beta[t, v]]
+                if v < en_len - 1:
+                    to_sum.append(
+                        self.weights[insertion_id] + beta[t, v + 1])
+                if t < ar_len - 1:
+                    to_sum.append(
+                        self.weights[deletion_id] + beta[t + 1, v])
+                if v < en_len - 1 and t < ar_len - 1:
+                    to_sum.append(
+                        self.weights[subsitute_id] + beta[t + 1, v + 1])
+                beta[t, v] = torch.logsumexp(torch.tensor(to_sum), dim=0)
+
+        expand_weights = self.weights.unsqueeze(0).unsqueeze(0)
+        # deletion expectation
+        expected_deletions = (
+            alpha[:-1, :].unsqueeze(2) +
+            expand_weights + plausible_deletions[1:, :] +
+            beta[1:, :].unsqueeze(2))
+        # insertoin expectation
+        expected_insertions = (
+            alpha[:, :-1].unsqueeze(2) +
+            expand_weights + plausible_insertions[:, 1:] +
+            beta[:, 1:].unsqueeze(2))
+        # substitution expectation
+        expected_substitutions = (
+            alpha[:-1, :-1].unsqueeze(2) +
+            expand_weights + plausible_substitutions[1:, 1:] +
+            beta[1:, 1:].unsqueeze(2))
+
+        all_counts = torch.cat([
+            expected_deletions.reshape((-1, self.n_target_classes)),
+            expected_insertions.reshape((-1, self.n_target_classes)),
+            expected_substitutions.reshape((-1, self.n_target_classes))],
+            dim=0)
+
+        expected_counts = all_counts.logsumexp(0)
+        return expected_counts
+
+    def viterbi(self, ar_sent, en_sent):
+        ar_len, en_len = ar_sent.size(0), en_sent.size(0)
+
+        action_count = torch.zeros((ar_len, en_len))
+        alpha = torch.zeros((ar_len, en_len)) - MINF
+        alpha[0, 0] = 0
+        for t, ar_char in enumerate(ar_sent[:, 0]):
+            for v, en_char in enumerate(en_sent[:, 0]):
+                if t == 0 and v == 0:
+                    continue
+
+                deletion_id = self._deletion_id(ar_char)
+                insertion_id = self._insertion_id(en_char)
+                subsitute_id = self._substitute_id(ar_char, en_char)
+
+                possible_actions = []
+
+                if v >= 1:
+                    possible_actions.append(
+                        (self.weights[insertion_id] + alpha[t, v - 1],
+                         action_count[t, v - 1] + 1))
+                if t >= 1:
+                    possible_actions.append(
+                        (self.weights[deletion_id] + alpha[t - 1, v],
+                         action_count[t - 1, v] + 1))
+                if v >= 1 and t >= 1:
+                    possible_actions.append(
+                        (self.weights[subsitute_id] + alpha[t - 1, v - 1],
+                         action_count[t - 1, v - 1] + 1))
+
+                best_action_cost, best_action_count = max(
+                    possible_actions, key=lambda x: x[0] / x[1])
+
+                alpha[t, v] = best_action_cost
+                action_count[t, v] = best_action_count
+
+        return torch.exp(alpha[-1, -1] / action_count[-1, -1])
+
+    def maximize_expectation(self, expectations):
+        epsilon = torch.log(torch.tensor(1e-16)) + \
+            torch.zeros_like(self.weights)
+        expecation_sum = torch.stack([epsilon] + expectations).logsumexp(0)
+        distribution = (
+            expecation_sum - expecation_sum.logsumexp(0, keepdim=True))
+
+        self.weights = torch.stack([
+            torch.log(torch.tensor(0.9)) + self.weights,
+            torch.log(torch.tensor(0.1)) + distribution]).logsumexp(0)
+
+        return (action_scores, torch.exp(expected_counts),
+                alpha[-1, -1], next_symbol_logprobs)
+
+    def decode(self, ar_sent):
+        en_sent = torch.tensor([[self.en_bos]])
+        (ar_len, en_len, feature_table,
+         action_scores, _, _) = self._action_scores(
+            ar_sent, en_sent, inference=False)
+
+        # special case, v = 0
+        alpha = torch.zeros((ar_len, 1)) + MINF
+        for t, ar_char in enumerate(ar_sent[0]):
+            if t == 0:
+                alpha[0, 0] = 0.
+                continue
+            deletion_id = self._deletion_id(ar_char)
+            alpha[t, 0] = action_scores[t, 0, deletion_id] + alpha[t - 1][0]
+
+        for v in range(1, 2 * ar_sent.size(1)):
+            # From what we have, do a prediction what is the next symbol
+            insertion_logits = torch.matmul(
+                self.insertion_proj(feature_table[:, v - 1:v]),
+                self.tgt_embeddings)  # + alpha[:, v - 1:v].unsqueeze(2)
+            # TODO maybe weight by alpha?
+
+            subs_logits = torch.matmul(
+                self.substitution_proj(feature_table[1:, v - 1:v]),
+                self.tgt_embeddings)  # + alpha[1:, v - 1:v].unsqueeze(2)
+            # TODO maybe weight by alpha?
+
+            # TODO and what about summing them instead of logsumexping?
+            next_symb_logits = torch.cat(
+                (insertion_logits, subs_logits), dim=0).logsumexp(0)
+            next_symbol = next_symb_logits.argmax(1)
+
+            en_sent = torch.cat(
+                (en_sent, next_symbol.unsqueeze(0)), dim=1)
 
             ar_len, en_len, feature_table, action_scores, _, _ = self._action_scores(
                 ar_sent, en_sent, inference=True)

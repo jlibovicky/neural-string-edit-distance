@@ -10,6 +10,8 @@ from torchtext import data
 
 from models import (
     EditDistNeuralModelConcurrent, EditDistNeuralModelProgressive)
+from transliteration_utils import (
+    load_transliteration_data, decode_ids, char_error_rate)
 
 
 def main():
@@ -17,24 +19,13 @@ def main():
     parser.add_argument("data_prefix", type=str)
     parser.add_argument("--em-loss", default=None, type=float)
     parser.add_argument("--nll-loss", default=None, type=float)
+    parser.add_argument("--hidden-size", default=64, type=int)
+    parser.add_argument("--attention-heads", default=4, type=int)
+    parser.add_argument("--layers", default=2, type=int)
     args = parser.parse_args()
 
-    ar_text_field = data.Field(
-        tokenize=list, init_token="<s>", eos_token="</s>", batch_first=True)
-    en_text_field = data.Field(
-        tokenize=list, init_token="<s>", eos_token="</s>", batch_first=True)
-
-    train_data, val_data, test_data = data.TabularDataset.splits(
-        path=args.data_prefix, train='train.txt',
-        validation='eval.txt', test='test.txt', format='tsv',
-        fields=[('ar', ar_text_field), ('en', en_text_field)])
-
-    ar_text_field.build_vocab(train_data)
-    en_text_field.build_vocab(train_data)
-
-    train_iter, val_iter, test_iter = data.Iterator.splits(
-        (train_data, val_data, test_data), batch_sizes=(1, 1, 1),
-        shuffle=True, device=0, sort_key=lambda x: len(x.ar))
+    ar_text_field, en_text_field, train_iter, val_iter, test_iter = \
+        load_transliteration_data(args.data_prefix, 1)
 
     neural_model = EditDistNeuralModelProgressive(
         ar_text_field.vocab, en_text_field.vocab, directed=True)
@@ -44,6 +35,9 @@ def main():
     kl_div = nn.KLDivLoss(reduction='batchmean')
     nll = nn.NLLLoss()
     optimizer = optim.Adam(neural_model.parameters())
+    scheduler = transformers.get_linear_schedule_with_warmup(
+        optimizer, num_warmup_steps=4000,
+        num_training_steps=100000)
 
     en_examples = []
     ar_examples = []
@@ -90,13 +84,10 @@ def main():
                     # * accuracy of decoded
 
                     with torch.no_grad():
-                        src_string = "".join(
-                            [ar_text_field.vocab.itos[c] for c in val_ex.ar[0]])
-                        tgt_string = "".join(
-                            [en_text_field.vocab.itos[c] for c in val_ex.en[0]])
+                        src_string = decode_ids(val_ex.ar[0], ar_text_field)
+                        tgt_string = decode_ids(val_ex.en[0], en_text_field)
                         decoded_val = neural_model.decode(val_ex.ar)
-                        hypothesis = "".join(
-                            en_text_field.vocab.itos[c] for c in decoded_val[0])
+                        hypothesis = decode_ids(decoded_val[0], en_text_field)
 
                         ground_truth.append(tgt_string)
                         hypotheses.append(hypothesis)
@@ -108,7 +99,7 @@ def main():
                             #     val_ex.ar, decoded_val)
 
                             print()
-                            print(f"{src_string} -> {hypothesis} ({tgt_string})")
+                            print(f"'{src_string}' -> '{hypothesis}' ({tgt_string})")
                             # print(f"  hyp. prob.: {decoded_prob:.3f}, "
                             #       f"correct prob.: {correct_prob:.3f}, "
                             #       f"ratio: {decoded_prob / correct_prob:.3f}")
@@ -121,9 +112,7 @@ def main():
                     float(gt == hyp) for gt, hyp
                     in zip(ground_truth, hypotheses)) / len(ground_truth)
                 print(f"WER: {1 - accuracy}")
-                cer = wer(
-                    [" ".join(w) for w in ground_truth],
-                    [" ".join(w) for w in hypotheses])
+                cer = char_error_rate(hypotheses, ground_truth)
                 print(f"CER: {cer}")
                 print()
                 neural_model.train()
