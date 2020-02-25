@@ -30,7 +30,7 @@ def main():
     args = parser.parse_args()
 
     ar_text_field, en_text_field, train_iter, val_iter, test_iter = \
-        load_transliteration_data(args.data_prefix, 32)
+        load_transliteration_data(args.data_prefix, 1)
     tgt_pad_id = en_text_field.vocab[en_text_field.pad_token]
 
     neural_model = EditDistNeuralModelProgressive(
@@ -67,7 +67,7 @@ def main():
                 nll_loss_raw = nll(
                     next_symbol_score.reshape(-1, next_symbol_score.size(2)),
                     train_ex.en[:, 1:].reshape(-1))
-                masked_loss = torch.where(tgt_mask, nll_loss_raw, torch.zeros_like(nll_loss_raw))
+                masked_loss = nll_loss_raw * tgt_mask
                 nll_loss = masked_loss.sum() / tgt_mask.float().sum()
                 loss += args.nll_loss * nll_loss
 
@@ -80,9 +80,10 @@ def main():
                 optimizer.step()
                 optimizer.zero_grad()
 
-            if pos_examples % 2000 == 1999:
+            if pos_examples % 50 == 49:
                 neural_model.eval()
 
+                val_ex_count = 0
                 ground_truth = []
                 hypotheses = []
 
@@ -94,27 +95,29 @@ def main():
                     # * accuracy of decoded
 
                     with torch.no_grad():
-                        src_string = decode_ids(val_ex.ar[0], ar_text_field)
-                        tgt_string = decode_ids(val_ex.en[0], en_text_field)
-                        decoded_val = neural_model.decode(val_ex.ar)
-                        hypothesis = decode_ids(decoded_val[0], en_text_field)
+                        for ar_ex, en_ex in zip(val_ex.ar, val_ex.en):
+                            val_ex_count += 1
+                            src_string = decode_ids(ar_ex, ar_text_field)
+                            tgt_string = decode_ids(en_ex, en_text_field)
+                            decoded_val = neural_model.decode(ar_ex.unsqueeze(0))
+                            hypothesis = decode_ids(decoded_val[0], en_text_field)
 
-                        ground_truth.append(tgt_string)
-                        hypotheses.append(hypothesis)
+                            ground_truth.append(tgt_string)
+                            hypotheses.append(hypothesis)
 
-                        if j < 5:
-                            # correct_prob = neural_model.viterbi(
-                            #     val_ex.ar, val_ex.en)
-                            # decoded_prob = neural_model.viterbi(
-                            #     val_ex.ar, decoded_val)
+                            if val_ex_count < 5:
+                                # correct_prob = neural_model.viterbi(
+                                #     val_ex.ar, val_ex.en)
+                                # decoded_prob = neural_model.viterbi(
+                                #     val_ex.ar, decoded_val)
 
-                            print()
-                            print(f"'{src_string}' -> '{hypothesis}' ({tgt_string})")
-                            # print(f"  hyp. prob.: {decoded_prob:.3f}, "
-                            #       f"correct prob.: {correct_prob:.3f}, "
-                            #       f"ratio: {decoded_prob / correct_prob:.3f}")
+                                print()
+                                print(f"'{src_string}' -> '{hypothesis}' ({tgt_string})")
+                                # print(f"  hyp. prob.: {decoded_prob:.3f}, "
+                                #       f"correct prob.: {correct_prob:.3f}, "
+                                #       f"ratio: {decoded_prob / correct_prob:.3f}")
 
-                        if j >= 50:
+                        if j >= 20:
                             break
 
                 print()

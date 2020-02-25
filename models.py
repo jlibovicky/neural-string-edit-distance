@@ -8,6 +8,8 @@ from torchtext import data
 from transformers import BertConfig, BertModel
 
 MINF = torch.log(torch.tensor(0.))
+EPSILON = torch.log(torch.tensor(1e-9))
+EPSILON_4D = EPSILON.reshape((1, 1, 1, 1))
 
 
 class EditDistBase(nn.Module):
@@ -34,7 +36,7 @@ class EditDistBase(nn.Module):
                 self.en_symbol_count +  # insert target
                 self.ar_symbol_count * self.en_symbol_count)  # substitute
         else:
-            self.n_target_classes = 1 + 1 + 2 * self.en_symbol_count
+            self.n_target_classes = 1 + 2 * self.en_symbol_count
 
     @property
     def insertion_start(self):
@@ -48,13 +50,13 @@ class EditDistBase(nn.Module):
         if self.full_table:
             return 1 + ar_char
         else:
-            return 1
+            return 0
 
     def _insertion_id(self, en_char):
         if self.full_table:
             return 1 + self.ar_symbol_count + en_char
         else:
-            return 2 + en_char
+            return 1 + en_char
 
     def _substitute_id(self, ar_char, en_char):
         if self.full_table:
@@ -63,7 +65,7 @@ class EditDistBase(nn.Module):
             assert subs_id < self.n_target_classes
             return subs_id
         else:
-            return 2 + self.en_symbol_count + en_char
+            return 1 + self.en_symbol_count + en_char
 
 
 class EditDistNeuralModelConcurrent(EditDistBase):
@@ -151,7 +153,7 @@ class EditDistNeuralModelConcurrent(EditDistBase):
                 to_sum = []
                 if v >= 1:  # INSERTION
                     to_sum.append(
-                            action_scores[b_range, t, v, insertion_id] + alpha[t][v - 1])
+                        action_scores[b_range, t, v, insertion_id] + alpha[t][v - 1])
                 if t >= 1:  # DELETION
                     to_sum.append(
                         action_scores[b_range, t, v, deletion_id] + alpha[t - 1][v])
@@ -162,13 +164,14 @@ class EditDistNeuralModelConcurrent(EditDistBase):
                 if not to_sum:
                     alpha[t].append(torch.zeros((batch_size,)) + MINF)
                 if len(to_sum) == 1:
-                    alpha[t].append(to_sum[0] + table_mask[:, t, v].squeeze())
+                    alpha[t].append(to_sum[0])
                 else:
                     alpha[t].append(
                         torch.stack(to_sum).logsumexp(0) +
                         table_mask[:, t, v].squeeze())
 
-        alpha_tensor = torch.stack([torch.stack(v) for v in alpha]).permute(2, 0, 1)
+        alpha_tensor = torch.stack(
+            [torch.stack(v) for v in alpha]).permute(2, 0, 1)
         return alpha_tensor
 
     def _backward_evalatuion_and_expectation(
@@ -185,7 +188,7 @@ class EditDistNeuralModelConcurrent(EditDistBase):
         with torch.no_grad():
             # TODO this is wrong, we need to car to start with zero at the place the
             # when we reach the end of the particular string in the batch
-            beta = -1 / table_mask.squeeze()
+            beta = -1 / table_mask.squeeze(3)
 
             for t, ar_char in reversed(list(enumerate(ar_sent.transpose(0, 1)))):
                 for v, en_char in reversed(list(enumerate(en_sent.transpose(0, 1)))):
@@ -240,7 +243,7 @@ class EditDistNeuralModelConcurrent(EditDistBase):
         ar_len, en_len, feature_table, action_scores, table_mask = self._action_scores(
             ar_sent, en_sent)
 
-        alpha = self._forward_evaluation(ar_sent, en_sent, table_mask,table_mask, action_scores)
+        alpha = self._forward_evaluation(ar_sent, en_sent, table_mask, action_scores)
         expected_counts = self._backward_evalatuion_and_expectation(
             ar_len, en_len, ar_sent, en_sent, alpha, action_scores)
 
@@ -386,13 +389,12 @@ class EditDistNeuralModelProgressive(EditDistNeuralModelConcurrent):
         valid_deletion_logits = self.deletion_logit_proj(feature_table[:, :-1])
         deletion_padding = torch.zeros_like(valid_deletion_logits[:, :1]) + MINF
         padded_deletion_logits = torch.cat(
-            (deletion_padding, valid_deletion_logits), dim=1) #+ table_mask
+            (deletion_padding, valid_deletion_logits), dim=1)
 
         # INSERTIONS <<<
-        # TODO this masking might be wrong
         valid_insertion_logits = torch.matmul(
             self.insertion_proj(feature_table[:, :, :-1]),
-            self.tgt_embeddings) #
+            self.tgt_embeddings)
         insertion_padding = torch.zeros((
             valid_insertion_logits.size(0),
             valid_insertion_logits.size(1), 1,
@@ -401,10 +403,9 @@ class EditDistNeuralModelProgressive(EditDistNeuralModelConcurrent):
             (insertion_padding, valid_insertion_logits), dim=2)
 
         # SUBSITUTION <<<
-        # TODO this masking might be wrong
         valid_subs_logits = torch.matmul(
             self.substitution_proj(feature_table[:, :-1, :-1]),
-            self.tgt_embeddings) #
+            self.tgt_embeddings)
         src_subs_padding = torch.zeros_like(valid_subs_logits[:, :1]) + MINF
         src_padded_subs_logits = torch.cat(
             (src_subs_padding, valid_subs_logits), dim=1)
@@ -418,6 +419,10 @@ class EditDistNeuralModelProgressive(EditDistNeuralModelConcurrent):
         action_scores = F.log_softmax(torch.cat(
             (padded_deletion_logits, padded_insertion_logits, padded_subs_logits),
             dim=3), dim=3)
+
+        assert action_scores.size(1) == ar_len
+        assert action_scores.size(2) == en_len
+        assert action_scores.size(3) == self.n_target_classes
 
         return (ar_len, en_len, feature_table, action_scores,
                 valid_insertion_logits, # + table_mask[:, :, 1:],
@@ -435,15 +440,20 @@ class EditDistNeuralModelProgressive(EditDistNeuralModelConcurrent):
 
         insertion_log_dist = (
                 F.log_softmax(insertion_logits, dim=3) +
-                alpha[:, :, :-1].unsqueeze(3) +
+                #alpha[:, :, :-1].unsqueeze(3) +
                 table_mask[:, :, 1:])
         subs_log_dist = (
                 F.log_softmax(subs_logits, dim=3) +
-                alpha[:, :-1, :-1].unsqueeze(3) +
+                #alpha[:, :-1, :-1].unsqueeze(3) +
                 table_mask[:, 1:, 1:])
 
-        next_symbol_logprobs_sum = torch.cat(
-            (insertion_log_dist, subs_log_dist), dim=1).logsumexp(1)
+        next_dist = torch.cat(
+            (insertion_log_dist, subs_log_dist), dim=1)
+        smoothed_next_symbol_distribution = torch.stack((
+            next_dist,
+            EPSILON_4D.repeat(next_dist.shape)), dim=0).logsumexp(0)
+
+        next_symbol_logprobs_sum = smoothed_next_symbol_distribution.logsumexp(1)
         next_symbol_logprobs = (
             next_symbol_logprobs_sum -
             next_symbol_logprobs_sum.logsumexp(1, keepdims=True))
@@ -454,8 +464,10 @@ class EditDistNeuralModelProgressive(EditDistNeuralModelConcurrent):
     def decode(self, ar_sent):
         en_sent = torch.tensor([[self.en_bos]])
         (ar_len, en_len, feature_table,
-         action_scores, _, _) = self._action_scores(
+         action_scores, _, _, _) = self._action_scores(
             ar_sent, en_sent, inference=False)
+        action_scores = action_scores.squeeze(0)
+        feature_table = feature_table.squeeze(0)
 
         # special case, v = 0
         alpha = torch.zeros((ar_len, 1)) + MINF
@@ -486,8 +498,11 @@ class EditDistNeuralModelProgressive(EditDistNeuralModelConcurrent):
             en_sent = torch.cat(
                 (en_sent, next_symbol.unsqueeze(0)), dim=1)
 
-            ar_len, en_len, feature_table, action_scores, _, _ = self._action_scores(
-                ar_sent, en_sent, inference=True)
+            (ar_len, en_len, feature_table,
+             action_scores, _, _, _) = self._action_scores(
+                ar_sent, en_sent, inference=False)
+            action_scores = action_scores.squeeze(0)
+            feature_table = feature_table.squeeze(0)
             alpha = torch.cat(
                 (alpha, torch.zeros(ar_len, 1) + MINF), dim=1)
 
@@ -497,12 +512,12 @@ class EditDistNeuralModelProgressive(EditDistNeuralModelConcurrent):
                 subsitute_id = self._substitute_id(ar_char, en_sent[0, v])
 
                 to_sum = [
-                    action_scores[t, v - 1, insertion_id] + alpha[t][v - 1]]
+                    action_scores[t, v - 1, insertion_id] + alpha[t, v - 1]]
                 if t >= 1:
                     to_sum.append(
-                        action_scores[t, v - 1, deletion_id] + alpha[t - 1][v])
+                        action_scores[t, v - 1, deletion_id] + alpha[t - 1, v])
                     to_sum.append(
-                        action_scores[t, v - 1, subsitute_id] + alpha[t - 1][v - 1])
+                        action_scores[t, v - 1, subsitute_id] + alpha[t - 1, v - 1])
 
                 if len(to_sum) == 1:
                     alpha[t, v] = to_sum[0]
