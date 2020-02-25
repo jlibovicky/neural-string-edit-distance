@@ -117,10 +117,11 @@ class EditDistNeuralModelConcurrent(EditDistBase):
 
         # TODO when batched, we will need an extra dimension for batch
         feature_table = self.projection(torch.cat((
-            ar_vectors.transpose(0, 1).repeat(1, en_len, 1),
-            en_vectors.repeat(ar_len, 1, 1)), dim=2))
+            ar_vectors.unsqueeze(2).repeat(1, 1, en_len, 1),
+            en_vectors.unsqueeze(1).repeat(1, ar_len, 1, 1)), dim=3))
         action_scores = F.log_softmax(
-            self.action_projection(feature_table), dim=2)
+            self.action_projection(feature_table), dim=3)
+        action_scores = action_scores.squeeze(0)
 
         return ar_len, en_len, feature_table, action_scores
 
@@ -366,8 +367,9 @@ class EditDistNeuralModelProgressive(EditDistNeuralModelConcurrent):
 
         # TODO when batched, we will need an extra dimension for batch
         feature_table = self.projection(torch.cat((
-            ar_vectors.transpose(0, 1).repeat(1, en_len, 1),
-            en_vectors.repeat(ar_len, 1, 1)), dim=2))
+            ar_vectors.unsqueeze(2).repeat(1, 1, en_len, 1),
+            en_vectors.unsqueeze(1).repeat(1, ar_len, 1, 1)), dim=3))
+        feature_table = feature_table.squeeze(0)
 
         # DELETION <<<
         valid_deletion_logits = self.deletion_logit_proj(feature_table[:-1])
