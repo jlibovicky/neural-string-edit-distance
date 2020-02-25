@@ -12,13 +12,15 @@ MINF = torch.log(torch.tensor(0.))
 
 class EditDistBase(nn.Module):
     def __init__(self, ar_vocab, en_vocab, start_symbol,
-                 end_symbol, full_table=True):
+                 end_symbol, pad_symbol, full_table=True):
         super(EditDistBase, self).__init__()
 
         self.ar_bos = ar_vocab[start_symbol]
         self.ar_eos = ar_vocab[end_symbol]
+        self.ar_pad = ar_vocab[pad_symbol]
         self.en_bos = en_vocab[start_symbol]
         self.en_eos = en_vocab[end_symbol]
+        self.en_pad = en_vocab[pad_symbol]
 
         self.ar_symbol_count = len(ar_vocab)
         self.en_symbol_count = len(en_vocab)
@@ -32,7 +34,7 @@ class EditDistBase(nn.Module):
                 self.en_symbol_count +  # insert target
                 self.ar_symbol_count * self.en_symbol_count)  # substitute
         else:
-            self.n_target_classes = (1 + 2 * self.en_symbol_count)
+            self.n_target_classes = 1 + 2 * self.en_symbol_count
 
     @property
     def insertion_start(self):
@@ -67,9 +69,9 @@ class EditDistBase(nn.Module):
 class EditDistNeuralModelConcurrent(EditDistBase):
     def __init__(self, ar_vocab, en_vocab, directed=False, full_table=False,
                  hidden_dim=32, hidden_layers=2, attention_heads=4,
-                 start_symbol="<s>", end_symbol="</s>"):
+                 start_symbol="<s>", end_symbol="</s>", pad_symbol="<pad>"):
         super(EditDistNeuralModelConcurrent, self).__init__(
-            ar_vocab, en_vocab, start_symbol, end_symbol, full_table)
+            ar_vocab, en_vocab, start_symbol, end_symbol, pad_symbol, full_table)
 
         self.directed = directed
         self.hidden_dim = hidden_dim
@@ -336,12 +338,12 @@ class EditDistNeuralModelConcurrent(EditDistBase):
 class EditDistNeuralModelProgressive(EditDistNeuralModelConcurrent):
     def __init__(self, ar_vocab, en_vocab, directed=False,
                  hidden_dim=32, hidden_layers=2, attention_heads=4,
-                 start_symbol="<s>", end_symbol="</s>"):
+                 start_symbol="<s>", end_symbol="</s>", pad_symbol="<pad>"):
         super(EditDistNeuralModelProgressive, self).__init__(
             ar_vocab, en_vocab, directed, full_table=False,
             hidden_dim=hidden_dim, hidden_layers=hidden_layers,
             attention_heads=attention_heads,
-            start_symbol=start_symbol, end_symbol=end_symbol)
+            start_symbol=start_symbol, end_symbol=end_symbol, pad_symbol=pad_symbol)
 
         self.deletion_logit_proj = nn.Linear(self.hidden_dim, 1)
         self.insertion_proj = nn.Linear(self.hidden_dim, self.hidden_dim)
@@ -410,10 +412,10 @@ class EditDistNeuralModelProgressive(EditDistNeuralModelConcurrent):
         expected_counts = self._backward_evalatuion_and_expectation(
             ar_len, en_len, ar_sent, en_sent, alpha, action_scores)
 
-        insertion_log_dist = (F.log_softmax(insertion_logits, dim=2) +
-                              alpha[:, :-1].unsqueeze(2))
-        subs_log_dist = (F.log_softmax(subs_logits, dim=2) +
-                         alpha[:-1, :-1].unsqueeze(2))
+        insertion_log_dist = F.log_softmax(insertion_logits, dim=2)
+                              #alpha[:, :-1].unsqueeze(2))
+        subs_log_dist = F.log_softmax(subs_logits, dim=2)
+                        # alpha[:-1, :-1].unsqueeze(2))
 
         next_symbol_logprobs_sum = torch.cat(
             (insertion_log_dist, subs_log_dist), dim=0).logsumexp(0)
