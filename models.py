@@ -365,45 +365,53 @@ class EditDistNeuralModelProgressive(EditDistNeuralModelConcurrent):
         else:
             en_vectors = self.en_encoder(en_sent)[0]
 
-        # TODO when batched, we will need an extra dimension for batch
         feature_table = self.projection(torch.cat((
             ar_vectors.unsqueeze(2).repeat(1, 1, en_len, 1),
             en_vectors.unsqueeze(1).repeat(1, ar_len, 1, 1)), dim=3))
-        feature_table = feature_table.squeeze(0)
 
         # DELETION <<<
-        valid_deletion_logits = self.deletion_logit_proj(feature_table[:-1])
-        deletion_padding = torch.zeros_like(valid_deletion_logits[:1]) + MINF
+        valid_deletion_logits = self.deletion_logit_proj(feature_table[:, :-1])
+        deletion_padding = torch.zeros_like(valid_deletion_logits[:, :1]) + MINF
         padded_deletion_logits = torch.cat(
-            (deletion_padding, valid_deletion_logits), dim=0)
+            (deletion_padding, valid_deletion_logits), dim=1)
 
         # INSERTIONS <<<
         valid_insertion_logits = torch.matmul(
-            self.insertion_proj(feature_table[:, :-1]),
+            self.insertion_proj(feature_table[:, :, :-1]),
             self.tgt_embeddings)
         insertion_padding = torch.zeros((
-            valid_insertion_logits.size(0), 1, valid_insertion_logits.size(2))) + MINF
+            valid_insertion_logits.size(0),
+            valid_insertion_logits.size(1), 1,
+            valid_insertion_logits.size(3))) + MINF
         padded_insertion_logits = torch.cat(
-            (insertion_padding, valid_insertion_logits), dim=1)
+            (insertion_padding, valid_insertion_logits), dim=2)
 
         # SUBSITUTION <<<
         valid_subs_logits = torch.matmul(
-            self.substitution_proj(feature_table[:-1, :-1]),
+            self.substitution_proj(feature_table[:, :-1, :-1]),
             self.tgt_embeddings)
-        src_subs_padding = torch.zeros_like(valid_subs_logits[:1]) + MINF
+        src_subs_padding = torch.zeros_like(valid_subs_logits[:, :1]) + MINF
         src_padded_subs_logits = torch.cat(
-            (src_subs_padding, valid_subs_logits), dim=0)
+            (src_subs_padding, valid_subs_logits), dim=1)
         tgt_subs_padding = torch.zeros((
-            src_padded_subs_logits.size(0), 1, src_padded_subs_logits.size(2))) + MINF
+            src_padded_subs_logits.size(0),
+            src_padded_subs_logits.size(1), 1,
+            src_padded_subs_logits.size(3))) + MINF
         padded_subs_logits = torch.cat(
-            (tgt_subs_padding, src_padded_subs_logits), dim=1)
+            (tgt_subs_padding, src_padded_subs_logits), dim=2)
 
         action_scores = F.log_softmax(torch.cat(
             (padded_deletion_logits, padded_insertion_logits, padded_subs_logits),
-            dim=2), dim=2)
+            dim=3), dim=3)
+
+        assert action_scores.size(1) == ar_len
+        assert action_scores.size(2) == en_len
+        assert action_scores.size(3) == self.n_target_classes
+        action_scores = action_scores.squeeze(0)
 
         return (ar_len, en_len, feature_table, action_scores,
-                valid_insertion_logits, valid_subs_logits)
+                valid_insertion_logits.squeeze(0),
+                valid_subs_logits.squeeze(0))
 
     def forward(self, ar_sent, en_sent):
         (ar_len, en_len, feature_table, action_scores,
@@ -445,6 +453,7 @@ class EditDistNeuralModelProgressive(EditDistNeuralModelConcurrent):
 
         for v in range(1, 2 * ar_sent.size(1)):
             # From what we have, do a prediction what is the next symbol
+            import ipdb; ipdb.set_trace()
             insertion_logits = torch.matmul(
                 self.insertion_proj(feature_table[:, v - 1:v]),
                 self.tgt_embeddings)# + alpha[:, v - 1:v].unsqueeze(2)
