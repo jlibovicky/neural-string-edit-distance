@@ -35,9 +35,6 @@ def main():
     kl_div = nn.KLDivLoss(reduction='batchmean')
     nll = nn.NLLLoss()
     optimizer = optim.Adam(neural_model.parameters())
-    scheduler = transformers.get_linear_schedule_with_warmup(
-        optimizer, num_warmup_steps=4000,
-        num_training_steps=100000)
 
     en_examples = []
     ar_examples = []
