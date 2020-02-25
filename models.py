@@ -136,11 +136,13 @@ class EditDistNeuralModelConcurrent(EditDistBase):
     def _forward_evaluation(self, ar_sent, en_sent, action_scores):
         """Differentiable forward pass through the model."""
         alpha = []
-        for t, ar_char in enumerate(ar_sent[0]):
+        batch_size = ar_sent.size(0)
+        b_range = torch.arange(batch_size)
+        for t, ar_char in enumerate(ar_sent.transpose(0, 1)):
             alpha.append([])
-            for v, en_char in enumerate(en_sent[0]):
+            for v, en_char in enumerate(en_sent.transpose(0, 1)):
                 if t == 0 and v == 0:
-                    alpha[0].append(torch.tensor(0.))
+                    alpha[0].append(torch.zeros((batch_size,)))
                     continue
 
                 deletion_id = self._deletion_id(ar_char)
@@ -150,26 +152,30 @@ class EditDistNeuralModelConcurrent(EditDistBase):
                 to_sum = []
                 if v >= 1:  # INSERTION
                     to_sum.append(
-                        action_scores[t, v, insertion_id] + alpha[t][v - 1])
+                        action_scores[b_range, t, v, insertion_id] + alpha[t][v - 1])
                 if t >= 1:  # DELETION
                     to_sum.append(
-                        action_scores[t, v, deletion_id] + alpha[t - 1][v])
+                        action_scores[b_range, t, v, deletion_id] + alpha[t - 1][v])
                 if v >= 1 and t >= 1:  # SUBSTITUTION
                     to_sum.append(
-                        action_scores[t, v, subsitute_id] + alpha[t - 1][v - 1])
+                        action_scores[b_range, t, v, subsitute_id] + alpha[t - 1][v - 1])
 
                 if not to_sum:
-                    alpha[t].append(MINF)
+                    alpha[t].append(torch.zeros((batch_size,)) + MINF)
                 if len(to_sum) == 1:
                     alpha[t].append(to_sum[0])
                 else:
-                    alpha[t].append(torch.stack(to_sum).logsumexp(0))
+                    alpha[t].append(
+                        torch.stack(to_sum).logsumexp(0))
 
-        alpha_tensor = torch.stack([torch.stack(v) for v in alpha])
+        alpha_tensor = torch.stack(
+            [torch.stack(v) for v in alpha]).permute(2, 0, 1)
         return alpha_tensor
 
+    # TODO add @torch.no_grad()
     def _backward_evalatuion_and_expectation(
             self, ar_len, en_len, ar_sent, en_sent, alpha, action_scores):
+        alpha = alpha.squeeze(0)
         # This is the backward pass through the edit distance table.
         # Unlike, the forward pass it does not have to be differentiable.
         plausible_deletions = torch.zeros_like(action_scores) + MINF
@@ -407,11 +413,10 @@ class EditDistNeuralModelProgressive(EditDistNeuralModelConcurrent):
         assert action_scores.size(1) == ar_len
         assert action_scores.size(2) == en_len
         assert action_scores.size(3) == self.n_target_classes
-        action_scores = action_scores.squeeze(0)
 
-        return (ar_len, en_len, feature_table, action_scores,
-                valid_insertion_logits.squeeze(0),
-                valid_subs_logits.squeeze(0))
+        return (ar_len, en_len, feature_table.squeeze(0), action_scores,
+                valid_insertion_logits,
+                valid_subs_logits)
 
     def forward(self, ar_sent, en_sent):
         (ar_len, en_len, feature_table, action_scores,
@@ -420,12 +425,12 @@ class EditDistNeuralModelProgressive(EditDistNeuralModelConcurrent):
 
         alpha = self._forward_evaluation(ar_sent, en_sent, action_scores)
         expected_counts = self._backward_evalatuion_and_expectation(
-            ar_len, en_len, ar_sent, en_sent, alpha, action_scores)
+            ar_len, en_len, ar_sent, en_sent, alpha, action_scores.squeeze(0))
 
-        insertion_log_dist = F.log_softmax(insertion_logits, dim=2)
-                              #alpha[:, :-1].unsqueeze(2))
-        subs_log_dist = F.log_softmax(subs_logits, dim=2)
-                        # alpha[:-1, :-1].unsqueeze(2))
+        insertion_log_dist = (F.log_softmax(insertion_logits, dim=3) +
+                              alpha[:, :, :-1].unsqueeze(3)).squeeze(0)
+        subs_log_dist = (F.log_softmax(subs_logits, dim=3) +
+                         alpha[:, :-1, :-1].unsqueeze(3)).squeeze(0)
 
         next_symbol_logprobs_sum = torch.cat(
             (insertion_log_dist, subs_log_dist), dim=0).logsumexp(0)
@@ -441,6 +446,7 @@ class EditDistNeuralModelProgressive(EditDistNeuralModelConcurrent):
         (ar_len, en_len, feature_table,
          action_scores, _, _) = self._action_scores(
             ar_sent, en_sent, inference=False)
+        action_scores = action_scores.squeeze(0)
 
         # special case, v = 0
         alpha = torch.zeros((ar_len, 1)) + MINF
@@ -453,7 +459,6 @@ class EditDistNeuralModelProgressive(EditDistNeuralModelConcurrent):
 
         for v in range(1, 2 * ar_sent.size(1)):
             # From what we have, do a prediction what is the next symbol
-            import ipdb; ipdb.set_trace()
             insertion_logits = torch.matmul(
                 self.insertion_proj(feature_table[:, v - 1:v]),
                 self.tgt_embeddings)# + alpha[:, v - 1:v].unsqueeze(2)
@@ -474,6 +479,7 @@ class EditDistNeuralModelProgressive(EditDistNeuralModelConcurrent):
 
             ar_len, en_len, feature_table, action_scores, _, _ = self._action_scores(
                 ar_sent, en_sent, inference=True)
+            action_scores = action_scores.squeeze(0)
             alpha = torch.cat(
                 (alpha, torch.zeros(ar_len, 1) + MINF), dim=1)
 
