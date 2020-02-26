@@ -12,7 +12,7 @@ MINF = torch.log(torch.tensor(0.))
 
 class EditDistBase(nn.Module):
     def __init__(self, ar_vocab, en_vocab, start_symbol,
-                 end_symbol, pad_symbol, full_table=True):
+                 end_symbol, pad_symbol, full_table=True, tiny_table=False):
         super(EditDistBase, self).__init__()
 
         self.ar_bos = ar_vocab[start_symbol]
@@ -25,7 +25,12 @@ class EditDistBase(nn.Module):
         self.ar_symbol_count = len(ar_vocab)
         self.en_symbol_count = len(en_vocab)
 
+        if full_table and tiny_table:
+            raise ValueError(
+                "Cannot use full table and tiny table at the same time.")
+
         self.full_table = full_table
+        self.tiny_table = tiny_table
 
         if full_table:
             self.n_target_classes = (
@@ -33,26 +38,24 @@ class EditDistBase(nn.Module):
                 self.ar_symbol_count +  # delete source
                 self.en_symbol_count +  # insert target
                 self.ar_symbol_count * self.en_symbol_count)  # substitute
+        elif tiny_table:
+            self.n_target_classes = 4
         else:
             self.n_target_classes = 1 + 2 * self.en_symbol_count
-
-    @property
-    def insertion_start(self):
-        return 1 + self.ar_symbol_count
-
-    @property
-    def insertion_end(self):
-        return 1 + self.ar_symbol_count + self.en_symbol_count
 
     def _deletion_id(self, ar_char):
         if self.full_table:
             return 1 + ar_char
+        if self.tiny_table:
+            return 0
         else:
             return 0
 
     def _insertion_id(self, en_char):
         if self.full_table:
             return 1 + self.ar_symbol_count + en_char
+        if self.tiny_table:
+            return 1
         else:
             return 1 + en_char
 
@@ -62,16 +65,19 @@ class EditDistBase(nn.Module):
                        self.en_symbol_count * ar_char + en_char)
             assert subs_id < self.n_target_classes
             return subs_id
+        if self.tiny_table:
+            return 2
         else:
             return 1 + self.en_symbol_count + en_char
 
 
 class EditDistNeuralModelConcurrent(EditDistBase):
-    def __init__(self, ar_vocab, en_vocab, directed=False, full_table=False,
+    def __init__(self, ar_vocab, en_vocab, directed=False,
                  hidden_dim=32, hidden_layers=2, attention_heads=4,
                  start_symbol="<s>", end_symbol="</s>", pad_symbol="<pad>"):
         super(EditDistNeuralModelConcurrent, self).__init__(
-            ar_vocab, en_vocab, start_symbol, end_symbol, pad_symbol, full_table)
+            ar_vocab, en_vocab, start_symbol, end_symbol, pad_symbol,
+            full_table=False, tiny_table=True)
 
         self.directed = directed
         self.hidden_dim = hidden_dim
@@ -86,9 +92,6 @@ class EditDistNeuralModelConcurrent(EditDistBase):
             nn.Dropout(0.3),
             nn.ReLU())
         self.action_projection = nn.Linear(hidden_dim, self.n_target_classes)
-
-        if self.directed:
-            self.output_symbol_projection = nn.Linear(hidden_dim, len(en_vocab))
 
     def _encoder_for_vocab(self, vocab, directed=False):
         config = BertConfig(

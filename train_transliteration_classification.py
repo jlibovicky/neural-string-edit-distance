@@ -40,7 +40,7 @@ def main():
         ar_text_field.vocab, en_text_field.vocab)
 
     kl_div_loss = nn.KLDivLoss(reduction='batchmean')
-    bc_loss = nn.BCELoss()
+    xent_loss = nn.CrossEntropyLoss()
     optimizer = optim.Adam(neural_model.parameters())
 
     pos_examples = 0
@@ -52,9 +52,16 @@ def main():
         action_scores, expected_counts, logprob = neural_model(
             train_ex.ar, train_ex.en)
 
-        loss = label * logprob
+        loss = -label * logprob
         if label == 1:
-            loss += kl_div_loss(action_scores, expected_counts)
+            #fake_targets = expected_counts.argmax(-1)
+            loss += kl_div_loss(
+                action_scores.reshape(-1, 4),
+                expected_counts.reshape(-1, 4))
+        loss += -label * xent_loss(
+            action_scores.reshape(-1, 4),
+            torch.full(action_scores.shape[:-1], 3, dtype=torch.long).reshape(-1))
+
         loss.backward()
 
         if pos_examples % 50 == 49:
