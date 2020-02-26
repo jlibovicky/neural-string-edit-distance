@@ -81,9 +81,9 @@ class EditDistNeuralModelConcurrent(EditDistBase):
         self.en_encoder = self._encoder_for_vocab(en_vocab, directed=directed)
 
         self.projection = nn.Sequential(
-            nn.Dropout(0.1),
+            nn.Dropout(0.3),
             nn.Linear(2 * hidden_dim, hidden_dim),
-            nn.Dropout(0.1),
+            nn.Dropout(0.3),
             nn.ReLU())
         self.action_projection = nn.Linear(hidden_dim, self.n_target_classes)
 
@@ -99,8 +99,8 @@ class EditDistNeuralModelConcurrent(EditDistBase):
             num_attention_heads=self.attention_heads,
             intermediate_size=2 * self.hidden_dim,
             hidden_act='gelu',
-            hidden_dropout_prob=0.1,
-            attention_probs_dropout_prob=0.1)
+            hidden_dropout_prob=0.3,
+            attention_probs_dropout_prob=0.3)
 
         return BertModel(config)
 
