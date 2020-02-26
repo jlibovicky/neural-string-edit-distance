@@ -145,13 +145,16 @@ class EditDistNeuralModelConcurrent(EditDistBase):
                 to_sum = []
                 if v >= 1:  # INSERTION
                     to_sum.append(
-                        action_scores[b_range, t, v, insertion_id] + alpha[t][v - 1])
+                        action_scores[b_range, t, v, insertion_id] +
+                        alpha[t][v - 1])
                 if t >= 1:  # DELETION
                     to_sum.append(
-                        action_scores[b_range, t, v, deletion_id] + alpha[t - 1][v])
+                        action_scores[b_range, t, v, deletion_id] +
+                        alpha[t - 1][v])
                 if v >= 1 and t >= 1:  # SUBSTITUTION
                     to_sum.append(
-                        action_scores[b_range, t, v, subsitute_id] + alpha[t - 1][v - 1])
+                        action_scores[b_range, t, v, subsitute_id] +
+                        alpha[t - 1][v - 1])
 
                 if not to_sum:
                     alpha[t].append(torch.zeros((batch_size,)) + MINF)
@@ -165,7 +168,7 @@ class EditDistNeuralModelConcurrent(EditDistBase):
             [torch.stack(v) for v in alpha]).permute(2, 0, 1)
         return alpha_tensor
 
-    # TODO add @torch.no_grad()
+    @torch.no_grad()
     def _backward_evalatuion_and_expectation(
             self, ar_len, en_len, ar_sent, en_sent, alpha, action_scores):
         # This is the backward pass through the edit distance table.
@@ -177,35 +180,37 @@ class EditDistNeuralModelConcurrent(EditDistBase):
         batch_size = ar_sent.size(0)
         b_range = torch.arange(batch_size)
 
-        with torch.no_grad():
-            beta = torch.zeros_like(alpha) + MINF
-            beta[:, -1, -1] = 0.0
+        beta = torch.zeros_like(alpha) + MINF
+        beta[:, -1, -1] = 0.0
 
-            for t, ar_char in reversed(list(enumerate(ar_sent.transpose(0, 1)))):
-                for v, en_char in reversed(list(enumerate(en_sent.transpose(0, 1)))):
-                    deletion_id = self._deletion_id(ar_char)
-                    insertion_id = self._insertion_id(en_char)
-                    subsitute_id = self._substitute_id(ar_char, en_char)
+        for t, ar_char in reversed(list(enumerate(ar_sent.transpose(0, 1)))):
+            for v, en_char in reversed(list(enumerate(en_sent.transpose(0, 1)))):
+                deletion_id = self._deletion_id(ar_char)
+                insertion_id = self._insertion_id(en_char)
+                subsitute_id = self._substitute_id(ar_char, en_char)
 
-                    to_sum = [beta[:, t, v]]
-                    if v < en_len - 1:
-                        plausible_insertions[b_range, t, v, insertion_id] = 0
-                        to_sum.append(
-                            action_scores[b_range, t, v + 1, insertion_id] + beta[:, t, v + 1])
-                    if t < ar_len - 1:
-                        plausible_deletions[b_range, t, v, deletion_id] = 0
-                        to_sum.append(
-                            action_scores[b_range, t + 1, v, deletion_id] + beta[:, t + 1, v])
-                    if v < en_len - 1 and t < ar_len - 1:
-                        plausible_substitutions[b_range, t, v, subsitute_id] = 0
-                        to_sum.append(
-                            action_scores[b_range, t + 1, v + 1, subsitute_id] + beta[:, t + 1, v + 1])
+                to_sum = [beta[:, t, v]]
+                if v < en_len - 1:
+                    plausible_insertions[b_range, t, v, insertion_id] = 0
+                    to_sum.append(
+                        action_scores[b_range, t, v + 1, insertion_id] +
+                        beta[:, t, v + 1])
+                if t < ar_len - 1:
+                    plausible_deletions[b_range, t, v, deletion_id] = 0
+                    to_sum.append(
+                        action_scores[b_range, t + 1, v, deletion_id] +
+                        beta[:, t + 1, v])
+                if v < en_len - 1 and t < ar_len - 1:
+                    plausible_substitutions[b_range, t, v, subsitute_id] = 0
+                    to_sum.append(
+                        action_scores[b_range, t + 1, v + 1, subsitute_id] +
+                        beta[:, t + 1, v + 1])
 
-                    beta[:, t, v] = torch.stack(to_sum).logsumexp(0)
+                beta[:, t, v] = torch.stack(to_sum).logsumexp(0)
 
             # deletion expectation
             expected_deletions = torch.zeros_like(action_scores) + MINF
-            expected_deletions[: ,1:, :] = (
+            expected_deletions[:, 1:, :] = (
                 alpha[:, :-1, :].unsqueeze(3) +
                 action_scores[:, 1:, :] + plausible_deletions[:, 1:, :] +
                 beta[:, 1:, :].unsqueeze(3))
