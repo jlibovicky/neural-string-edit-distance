@@ -175,60 +175,63 @@ class EditDistNeuralModelConcurrent(EditDistBase):
     # TODO add @torch.no_grad()
     def _backward_evalatuion_and_expectation(
             self, ar_len, en_len, ar_sent, en_sent, alpha, action_scores):
-        alpha = alpha.squeeze(0)
         # This is the backward pass through the edit distance table.
         # Unlike, the forward pass it does not have to be differentiable.
         plausible_deletions = torch.zeros_like(action_scores) + MINF
         plausible_insertions = torch.zeros_like(action_scores) + MINF
         plausible_substitutions = torch.zeros_like(action_scores) + MINF
 
-        with torch.no_grad():
-            beta = torch.zeros((ar_len, en_len)) + torch.log(torch.tensor(0.))
-            beta[-1, -1] = 0.0
+        batch_size = ar_sent.size(0)
+        b_range = torch.arange(batch_size)
 
-            for t, ar_char in reversed(list(enumerate(ar_sent[0]))):
-                for v, en_char in reversed(list(enumerate(en_sent[0]))):
+        with torch.no_grad():
+            beta = torch.zeros_like(alpha) + MINF
+            beta[:, -1, -1] = 0.0
+
+            for t, ar_char in reversed(list(enumerate(ar_sent.transpose(0, 1)))):
+                for v, en_char in reversed(list(enumerate(en_sent.transpose(0, 1)))):
                     deletion_id = self._deletion_id(ar_char)
                     insertion_id = self._insertion_id(en_char)
                     subsitute_id = self._substitute_id(ar_char, en_char)
 
-                    to_sum = [beta[t, v]]
+                    to_sum = [beta[:, t, v]]
                     if v < en_len - 1:
-                        plausible_insertions[t, v, insertion_id] = 0
+                        plausible_insertions[b_range, t, v, insertion_id] = 0
                         to_sum.append(
-                            action_scores[t, v + 1, insertion_id] + beta[t, v + 1])
+                            action_scores[b_range, t, v + 1, insertion_id] + beta[:, t, v + 1])
                     if t < ar_len - 1:
-                        plausible_deletions[t, v, deletion_id] = 0
+                        plausible_deletions[b_range, t, v, deletion_id] = 0
                         to_sum.append(
-                            action_scores[t + 1, v, deletion_id] + beta[t + 1, v])
+                            action_scores[b_range, t + 1, v, deletion_id] + beta[:, t + 1, v])
                     if v < en_len - 1 and t < ar_len - 1:
-                        plausible_substitutions[t, v, subsitute_id] = 0
+                        plausible_substitutions[b_range, t, v, subsitute_id] = 0
                         to_sum.append(
-                            action_scores[t + 1, v + 1, subsitute_id] + beta[t + 1, v + 1])
-                    beta[t, v] = torch.logsumexp(torch.tensor(to_sum), dim=0)
+                            action_scores[b_range, t + 1, v + 1, subsitute_id] + beta[:, t + 1, v + 1])
+
+                    beta[:, t, v] = torch.stack(to_sum).logsumexp(0)
 
             # deletion expectation
             expected_deletions = torch.zeros_like(action_scores) + MINF
-            expected_deletions[1:, :] = (
-                alpha[:-1, :].unsqueeze(2) +
-                action_scores[1:, :] + plausible_deletions[1:, :] +
-                beta[1:, :].unsqueeze(2))
+            expected_deletions[: ,1:, :] = (
+                alpha[:, :-1, :].unsqueeze(3) +
+                action_scores[:, 1:, :] + plausible_deletions[:, 1:, :] +
+                beta[:, 1:, :].unsqueeze(3))
             # insertions expectation
             expected_insertions = torch.zeros_like(action_scores) + MINF
-            expected_insertions[:, 1:] = (
-                alpha[:, :-1].unsqueeze(2) +
-                action_scores[:, 1:] + plausible_insertions[:, 1:] +
-                beta[:, 1:].unsqueeze(2))
+            expected_insertions[:, :, 1:] = (
+                alpha[:, :, :-1].unsqueeze(3) +
+                action_scores[:, :, 1:] + plausible_insertions[:, :, 1:] +
+                beta[:, :, 1:].unsqueeze(3))
             # substitution expectation
             expected_substitutions = torch.zeros_like(action_scores) + MINF
-            expected_substitutions[1:, 1:] = (
-                alpha[:-1, :-1].unsqueeze(2) +
-                action_scores[1:, 1:] + plausible_substitutions[1:, 1:] +
-                beta[1:, 1:].unsqueeze(2))
+            expected_substitutions[:, 1:, 1:] = (
+                alpha[:, :-1, :-1].unsqueeze(3) +
+                action_scores[:, 1:, 1:] + plausible_substitutions[:, 1:, 1:] +
+                beta[:, 1:, 1:].unsqueeze(3))
 
             expected_counts = torch.stack([
                 expected_deletions, expected_insertions, expected_substitutions]).logsumexp(0)
-            expected_counts -= expected_counts.logsumexp(2, keepdim=True)
+            expected_counts -= expected_counts.logsumexp(3, keepdim=True)
         return expected_counts
 
     def forward(self, ar_sent, en_sent):
@@ -425,25 +428,27 @@ class EditDistNeuralModelProgressive(EditDistNeuralModelConcurrent):
 
         alpha = self._forward_evaluation(ar_sent, en_sent, action_scores)
         expected_counts = self._backward_evalatuion_and_expectation(
-            ar_len, en_len, ar_sent, en_sent, alpha, action_scores.squeeze(0))
+            ar_len, en_len, ar_sent, en_sent, alpha, action_scores)
 
         insertion_log_dist = (F.log_softmax(insertion_logits, dim=3) +
-                              alpha[:, :, :-1].unsqueeze(3)).squeeze(0)
+                              alpha[:, :, :-1].unsqueeze(3))
         subs_log_dist = (F.log_softmax(subs_logits, dim=3) +
-                         alpha[:, :-1, :-1].unsqueeze(3)).squeeze(0)
+                         alpha[:, :-1, :-1].unsqueeze(3))
 
         next_symbol_logprobs_sum = torch.cat(
-            (insertion_log_dist, subs_log_dist), dim=0).logsumexp(0)
+            (insertion_log_dist, subs_log_dist), dim=1).logsumexp(1)
         next_symbol_logprobs = (
             next_symbol_logprobs_sum -
-            next_symbol_logprobs_sum.logsumexp(1, keepdims=True))
+            next_symbol_logprobs_sum.logsumexp(2, keepdims=True))
+
+        seq2seq_logits = torch.matmul(en_states, self.tgt_embeddings)
 
         return (action_scores, torch.exp(expected_counts),
-                alpha[-1, -1], next_symbol_logprobs)
+                alpha[-1, -1], next_symbol_logprobs, seq2seq_logits)
 
     def decode(self, ar_sent):
         en_sent = torch.tensor([[self.en_bos]])
-        (ar_len, en_len, feature_table,
+        (ar_len, en_len, _, feature_table,
          action_scores, _, _) = self._action_scores(
             ar_sent, en_sent, inference=False)
         action_scores = action_scores.squeeze(0)
@@ -477,7 +482,7 @@ class EditDistNeuralModelProgressive(EditDistNeuralModelConcurrent):
             en_sent = torch.cat(
                 (en_sent, next_symbol.unsqueeze(0)), dim=1)
 
-            ar_len, en_len, feature_table, action_scores, _, _ = self._action_scores(
+            ar_len, en_len, _, feature_table, action_scores, _, _ = self._action_scores(
                 ar_sent, en_sent, inference=True)
             action_scores = action_scores.squeeze(0)
             alpha = torch.cat(
