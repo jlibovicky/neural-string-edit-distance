@@ -115,23 +115,13 @@ class EditDistNeuralModelConcurrent(EditDistBase):
         else:
             en_vectors = self.en_encoder(en_sent)[0]
 
-        # TODO when batched, we will need an extra dimension for batch
         feature_table = self.projection(torch.cat((
             ar_vectors.unsqueeze(2).repeat(1, 1, en_len, 1),
             en_vectors.unsqueeze(1).repeat(1, ar_len, 1, 1)), dim=3))
         action_scores = F.log_softmax(
             self.action_projection(feature_table), dim=3)
-        action_scores = action_scores.squeeze(0)
 
         return ar_len, en_len, feature_table, action_scores
-
-    def _symbol_prediction(self, feature_table, alpha):
-        alpha_distributions = (alpha - alpha.logsumexp(1, keepdim=True)).exp()
-        context_vector = (alpha_distributions.unsqueeze(2)
-                          * feature_table).sum(1)
-
-        return F.log_softmax(
-            self.output_symbol_projection(feature_table.mean(0)), dim=1)
 
     def _forward_evaluation(self, ar_sent, en_sent, action_scores):
         """Differentiable forward pass through the model."""
@@ -242,107 +232,48 @@ class EditDistNeuralModelConcurrent(EditDistBase):
         expected_counts = self._backward_evalatuion_and_expectation(
             ar_len, en_len, ar_sent, en_sent, alpha, action_scores)
 
-        next_symbol_scores = None
-        if self.directed:
-            next_symbol_scores = self._symbol_prediction(
-                feature_table, alpha)[:-1]
+        return (action_scores, torch.exp(expected_counts), alpha[0, -1, -1])
 
-        return (action_scores, torch.exp(expected_counts),
-                alpha[-1, -1], next_symbol_scores)
-
+    @torch.no_grad()
     def viterbi(self, ar_sent, en_sent):
         ar_len, en_len, _, action_scores = self._action_scores(
             ar_sent, en_sent)
+        action_scores = action_scores.squeeze(0)
 
-        with torch.no_grad():
-            action_count = torch.zeros((ar_len, en_len))
-            alpha = torch.zeros((ar_len, en_len)) + MINF
-            alpha[0, 0] = 0
-            for t, ar_char in enumerate(ar_sent[0]):
-                for v, en_char in enumerate(en_sent[0]):
-                    if t == 0 and v == 0:
-                        continue
-
-                    deletion_id = self._deletion_id(ar_char)
-                    insertion_id = self._insertion_id(en_char)
-                    subsitute_id = self._substitute_id(ar_char, en_char)
-
-                    possible_actions = []
-
-                    if v >= 1:
-                        possible_actions.append(
-                            (action_scores[t, v, insertion_id] + alpha[t, v - 1],
-                             action_count[t, v - 1] + 1))
-                    if t >= 1:
-                        possible_actions.append(
-                            (action_scores[t, v, deletion_id] + alpha[t - 1, v],
-                             action_count[t - 1, v] + 1))
-                    if v >= 1 and t >= 1:
-                        possible_actions.append(
-                            (action_scores[t, v, subsitute_id] + alpha[t - 1, v - 1],
-                             action_count[t - 1, v - 1] + 1))
-
-                    best_action_cost, best_action_count = max(
-                        possible_actions, key=lambda x: x[0] / x[1])
-
-                    alpha[t, v] = best_action_cost
-                    action_count[t, v] = best_action_count
-
-        return torch.exp(alpha[-1, -1] / action_count[-1, -1])
-
-    def decode(self, ar_sent):
-        en_sent = torch.tensor([[self.en_bos]])
-        ar_len, en_len, feature_table, action_scores = self._action_scores(
-            ar_sent, en_sent, inference=False)
-
-        alpha = None
-        for v in range(2 * ar_sent.size(1)):
-            if alpha is None:
-                alpha = torch.zeros((ar_len, 1)) + MINF
-            else:
-                alpha = torch.cat(
-                    (alpha, torch.zeros(ar_len, 1) + MINF), dim=1)
-
-            ar_len, en_len, feature_table, action_scores = self._action_scores(
-                ar_sent, en_sent, inference=True)
-
-            for t, ar_char in enumerate(ar_sent[0]):
+        action_count = torch.zeros((ar_len, en_len))
+        alpha = torch.zeros((ar_len, en_len)) + MINF
+        alpha[0, 0] = 0
+        for t, ar_char in enumerate(ar_sent[0]):
+            for v, en_char in enumerate(en_sent[0]):
                 if t == 0 and v == 0:
-                    alpha[0, 0] = 0.
                     continue
 
                 deletion_id = self._deletion_id(ar_char)
-                insertion_id = self._insertion_id(en_sent[0, v])
-                subsitute_id = self._substitute_id(ar_char, en_sent[0, v])
+                insertion_id = self._insertion_id(en_char)
+                subsitute_id = self._substitute_id(ar_char, en_char)
 
-                to_sum = []
+                possible_actions = []
+
                 if v >= 1:
-                    to_sum.append(
-                        action_scores[t, v - 1, insertion_id] + alpha[t][v - 1])
+                    possible_actions.append(
+                        (action_scores[t, v, insertion_id] + alpha[t, v - 1],
+                         action_count[t, v - 1] + 1))
                 if t >= 1:
-                    to_sum.append(
-                        action_scores[t, v - 1, deletion_id] + alpha[t - 1][v])
-                if t >= 1 and v >= 1:
-                    to_sum.append(
-                        action_scores[t, v - 1, subsitute_id] + alpha[t - 1][v - 1])
+                    possible_actions.append(
+                        (action_scores[t, v, deletion_id] + alpha[t - 1, v],
+                         action_count[t - 1, v] + 1))
+                if v >= 1 and t >= 1:
+                    possible_actions.append(
+                        (action_scores[t, v, subsitute_id] + alpha[t - 1, v - 1],
+                         action_count[t - 1, v - 1] + 1))
 
-                if len(to_sum) == 1:
-                    alpha[t, v] = to_sum[0]
-                else:
-                    alpha[t, v] = torch.stack(to_sum).logsumexp(0)
+                best_action_cost, best_action_count = max(
+                    possible_actions, key=lambda x: x[0] / x[1])
 
-            # decide what the next symbol will be
-            next_symbol_scores = self._symbol_prediction(
-                feature_table[:, -1:], alpha[:, -1:])
-            next_symbol = next_symbol_scores.argmax(1)
+                alpha[t, v] = best_action_cost
+                action_count[t, v] = best_action_count
 
-            # expand the target sequence
-            en_sent = torch.cat(
-                (en_sent, next_symbol.unsqueeze(0)), dim=1)
-            if next_symbol == self.en_eos:
-                break
-
-        return en_sent
+        return torch.exp(alpha[-1, -1] / action_count[-1, -1])
 
 
 class EditDistNeuralModelProgressive(EditDistNeuralModelConcurrent):
@@ -417,12 +348,12 @@ class EditDistNeuralModelProgressive(EditDistNeuralModelConcurrent):
         assert action_scores.size(2) == en_len
         assert action_scores.size(3) == self.n_target_classes
 
-        return (ar_len, en_len, feature_table.squeeze(0), action_scores,
+        return (ar_len, en_len, en_vectors, feature_table.squeeze(0), action_scores,
                 valid_insertion_logits,
                 valid_subs_logits)
 
     def forward(self, ar_sent, en_sent):
-        (ar_len, en_len, feature_table, action_scores,
+        (ar_len, en_len, en_states, feature_table, action_scores,
             insertion_logits, subs_logits) = self._action_scores(
                 ar_sent, en_sent)
 
@@ -720,20 +651,24 @@ class EditDistStatModel(EditDistBase):
 
 
 class EditDistStatModel(EditDistBase):
-    def __init__(self, ar_vocab, en_vocab, start_symbol="<s>", end_symbol="</s>"):
+    def __init__(self, ar_vocab, en_vocab, start_symbol="<s>",
+                 end_symbol="</s>", pad_symbol="<pad>"):
         super(EditDistStatModel, self).__init__(
-            ar_vocab, en_vocab, start_symbol, end_symbol)
+            ar_vocab, en_vocab, start_symbol, end_symbol, pad_symbol)
 
         self.weights = torch.log(torch.tensor(
             [1 / self.n_target_classes for _ in range(self.n_target_classes)]))
 
     def forward(self, ar_sent, en_sent):
-        ar_len, en_len = ar_sent.size(0), en_sent.size(0)
+        ar_len, en_len = ar_sent.size(1), en_sent.size(1)
         table_shape = ((ar_len, en_len, self.n_target_classes))
 
         plausible_deletions = torch.zeros(table_shape) + MINF
         plausible_insertions = torch.zeros(table_shape) + MINF
         plausible_substitutions = torch.zeros(table_shape) + MINF
+
+        ar_sent = ar_sent.transpose(0, 1)
+        en_sent = en_sent.transpose(0, 1)
 
         alpha = torch.zeros((ar_len, en_len)) + MINF
         alpha[0, 0] = 0
@@ -809,7 +744,10 @@ class EditDistStatModel(EditDistBase):
         return expected_counts
 
     def viterbi(self, ar_sent, en_sent):
-        ar_len, en_len = ar_sent.size(0), en_sent.size(0)
+        ar_len, en_len = ar_sent.size(1), en_sent.size(1)
+
+        ar_sent = ar_sent.transpose(0, 1)
+        en_sent = en_sent.transpose(0, 1)
 
         action_count = torch.zeros((ar_len, en_len))
         alpha = torch.zeros((ar_len, en_len)) - MINF

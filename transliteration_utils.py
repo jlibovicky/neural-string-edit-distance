@@ -19,7 +19,7 @@ def load_transliteration_data(data_prefix, batch_size):
 
     train_iter, val_iter, test_iter = data.Iterator.splits(
         (train_data, val_data, test_data),
-        batch_sizes=(batch_size, batch_size, batch_size),
+        batch_sizes=(batch_size, 1, 1),
         shuffle=True, device=0, sort_key=lambda x: len(x.ar))
 
     return (ar_text_field, en_text_field, train_iter, val_iter, test_iter)
