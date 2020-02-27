@@ -74,10 +74,11 @@ class EditDistBase(nn.Module):
 class EditDistNeuralModelConcurrent(EditDistBase):
     def __init__(self, ar_vocab, en_vocab, directed=False,
                  hidden_dim=32, hidden_layers=2, attention_heads=4,
-                 start_symbol="<s>", end_symbol="</s>", pad_symbol="<pad>"):
+                 start_symbol="<s>", end_symbol="</s>", pad_symbol="<pad>",
+                 full_table=False, tiny_table=True):
         super(EditDistNeuralModelConcurrent, self).__init__(
             ar_vocab, en_vocab, start_symbol, end_symbol, pad_symbol,
-            full_table=False, tiny_table=True)
+            full_table=full_table, tiny_table=tiny_table)
 
         self.directed = directed
         self.hidden_dim = hidden_dim
@@ -157,7 +158,7 @@ class EditDistNeuralModelConcurrent(EditDistBase):
                         alpha[t - 1][v - 1])
 
                 if not to_sum:
-                    alpha[t].append(torch.zeros((batch_size,)) + MINF)
+                    alpha[t].append(torch.full(batch_size, MINF))
                 if len(to_sum) == 1:
                     alpha[t].append(to_sum[0])
                 else:
@@ -177,6 +178,9 @@ class EditDistNeuralModelConcurrent(EditDistBase):
         plausible_insertions = torch.zeros_like(action_scores) + MINF
         plausible_substitutions = torch.zeros_like(action_scores) + MINF
 
+        ar_lengths = (ar_sent != self.ar_pad).sum(1)
+        en_lengths = (en_sent != self.en_pad).sum(1)
+
         batch_size = ar_sent.size(0)
         b_range = torch.arange(batch_size)
 
@@ -189,48 +193,83 @@ class EditDistNeuralModelConcurrent(EditDistBase):
                 insertion_id = self._insertion_id(en_char)
                 subsitute_id = self._substitute_id(ar_char, en_char)
 
+                # Bool mask: when we are in the table inside both words
+                is_valid = (v <= (en_lengths - 1)) * (t <= (ar_lengths - 1))
+                # Bool mask: true for end state of word pairs
+                is_corner = (v == (en_lengths - 1)) * (t == (ar_lengths - 1))
+
                 to_sum = [beta[:, t, v]]
                 if v < en_len - 1:
-                    plausible_insertions[b_range, t, v, insertion_id] = 0
-                    to_sum.append(
+                    # The index of the plausible action is not index in the
+                    # beta table, but the index of the action which is one of
+                    # because of the backward direction.
+                    plausible_insertions[b_range, t, v + 1, insertion_id] = 0
+
+                    # What would be the insertion score look like if there
+                    # were anything to insert
+                    insertion_score_candidate = (
                         action_scores[b_range, t, v + 1, insertion_id] +
                         beta[:, t, v + 1])
+
+                    # This keeps MINF before we get inside the words
+                    to_sum.append(torch.where(
+                        is_valid,
+                        insertion_score_candidate,
+                        torch.full_like(insertion_score_candidate, MINF)))
                 if t < ar_len - 1:
-                    plausible_deletions[b_range, t, v, deletion_id] = 0
-                    to_sum.append(
+                    plausible_deletions[b_range, t + 1, v, deletion_id] = 0
+
+                    deletion_score_candidate = (
                         action_scores[b_range, t + 1, v, deletion_id] +
                         beta[:, t + 1, v])
+
+                    to_sum.append(torch.where(
+                        is_valid,
+                        deletion_score_candidate,
+                        torch.full_like(deletion_score_candidate, MINF)))
                 if v < en_len - 1 and t < ar_len - 1:
-                    plausible_substitutions[b_range, t, v, subsitute_id] = 0
-                    to_sum.append(
+                    plausible_substitutions[b_range, t + 1, v + 1, subsitute_id] = 0
+
+                    substitution_score_candidate = (
                         action_scores[b_range, t + 1, v + 1, subsitute_id] +
                         beta[:, t + 1, v + 1])
 
-                beta[:, t, v] = torch.stack(to_sum).logsumexp(0)
+                    to_sum.append(torch.where(
+                        is_valid,
+                        substitution_score_candidate,
+                        torch.full_like(insertion_score_candidate, MINF)))
 
-            # deletion expectation
-            expected_deletions = torch.zeros_like(action_scores) + MINF
-            expected_deletions[:, 1:, :] = (
-                alpha[:, :-1, :].unsqueeze(3) +
-                action_scores[:, 1:, :] + plausible_deletions[:, 1:, :] +
-                beta[:, 1:, :].unsqueeze(3))
-            # insertions expectation
-            expected_insertions = torch.zeros_like(action_scores) + MINF
-            expected_insertions[:, :, 1:] = (
-                alpha[:, :, :-1].unsqueeze(3) +
-                action_scores[:, :, 1:] + plausible_insertions[:, :, 1:] +
-                beta[:, :, 1:].unsqueeze(3))
-            # substitution expectation
-            expected_substitutions = torch.zeros_like(action_scores) + MINF
-            expected_substitutions[:, 1:, 1:] = (
-                alpha[:, :-1, :-1].unsqueeze(3) +
-                action_scores[:, 1:, 1:] + plausible_substitutions[:, 1:, 1:] +
-                beta[:, 1:, 1:].unsqueeze(3))
+                beta_candidate = torch.stack(to_sum).logsumexp(0)
 
-            expected_counts = torch.stack([
-                expected_deletions, expected_insertions, expected_substitutions]).logsumexp(0)
-            expected_counts -= expected_counts.logsumexp(3, keepdim=True)
-        return expected_counts
+                beta[:, t, v] = torch.where(
+                    is_corner, torch.zeros_like(beta_candidate),
+                    torch.where(is_valid, beta_candidate,
+                                torch.full_like(beta_candidate, MINF)))
+
+        # deletion expectation
+        expected_deletions = torch.zeros_like(action_scores) + MINF
+        expected_deletions[:, 1:, :] = (
+            alpha[:, :-1, :].unsqueeze(3) +
+            action_scores[:, 1:, :] + plausible_deletions[:, 1:, :] +
+            beta[:, 1:, :].unsqueeze(3))
+        # insertions expectation
+        expected_insertions = torch.zeros_like(action_scores) + MINF
+        expected_insertions[:, :, 1:] = (
+            alpha[:, :, :-1].unsqueeze(3) +
+            action_scores[:, :, 1:] + plausible_insertions[:, :, 1:] +
+            beta[:, :, 1:].unsqueeze(3))
+        # substitution expectation
+        expected_substitutions = torch.zeros_like(action_scores) + MINF
+        expected_substitutions[:, 1:, 1:] = (
+            alpha[:, :-1, :-1].unsqueeze(3) +
+            action_scores[:, 1:, 1:] + plausible_substitutions[:, 1:, 1:] +
+            beta[:, 1:, 1:].unsqueeze(3))
+
+        expected_counts = torch.stack([
+            expected_deletions, expected_insertions,
+            expected_substitutions], dim=4).logsumexp(4)
+        expected_counts -= expected_counts.logsumexp(3, keepdim=True)
+        return beta, expected_counts
 
     def forward(self, ar_sent, en_sent):
         ar_len, en_len, feature_table, action_scores = self._action_scores(
@@ -289,7 +328,7 @@ class EditDistNeuralModelProgressive(EditDistNeuralModelConcurrent):
                  hidden_dim=32, hidden_layers=2, attention_heads=4,
                  start_symbol="<s>", end_symbol="</s>", pad_symbol="<pad>"):
         super(EditDistNeuralModelProgressive, self).__init__(
-            ar_vocab, en_vocab, directed, full_table=False,
+            ar_vocab, en_vocab, directed, full_table=False, tiny_table=False,
             hidden_dim=hidden_dim, hidden_layers=hidden_layers,
             attention_heads=attention_heads,
             start_symbol=start_symbol, end_symbol=end_symbol, pad_symbol=pad_symbol)
@@ -366,13 +405,13 @@ class EditDistNeuralModelProgressive(EditDistNeuralModelConcurrent):
                 ar_sent, en_sent)
 
         alpha = self._forward_evaluation(ar_sent, en_sent, action_scores)
-        expected_counts = self._backward_evalatuion_and_expectation(
+        # legacy_beta, legacy_expected_count = self._legacy_backward_evalatuion_and_expectation(
+        #     ar_len, en_len, ar_sent, en_sent, alpha[0], action_scores[0])
+        beta, expected_counts = self._backward_evalatuion_and_expectation(
             ar_len, en_len, ar_sent, en_sent, alpha, action_scores)
 
-        insertion_log_dist = (F.log_softmax(insertion_logits, dim=3) +
-                              alpha[:, :, :-1].unsqueeze(3))
-        subs_log_dist = (F.log_softmax(subs_logits, dim=3) +
-                         alpha[:, :-1, :-1].unsqueeze(3))
+        insertion_log_dist = F.log_softmax(insertion_logits, dim=3)
+        subs_log_dist = F.log_softmax(subs_logits, dim=3)
 
         next_symbol_logprobs_sum = torch.cat(
             (insertion_log_dist, subs_log_dist), dim=1).logsumexp(1)

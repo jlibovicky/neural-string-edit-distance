@@ -2,7 +2,6 @@
 
 import argparse
 
-from jiwer import wer
 import torch
 from torch import nn, optim
 from torch.functional import F
@@ -24,6 +23,8 @@ def main():
     parser.add_argument("--attention-heads", default=4, type=int)
     parser.add_argument("--layers", default=2, type=int)
     parser.add_argument("--batch-size", default=32, type=int)
+    parser.add_argument("--delay-update", default=1, type=int,
+                        help="Update model every N steps.")
     args = parser.parse_args()
 
     ar_text_field, en_text_field, train_iter, val_iter, test_iter = \
@@ -32,9 +33,9 @@ def main():
     neural_model = EditDistNeuralModelProgressive(
         ar_text_field.vocab, en_text_field.vocab, directed=True)
 
-    kl_div = nn.KLDivLoss(reduction='batchmean')
-    nll = nn.NLLLoss()
-    xent = nn.CrossEntropyLoss()
+    kl_div = nn.KLDivLoss(reduction='none')
+    nll = nn.NLLLoss(reduction='none')
+    xent = nn.CrossEntropyLoss(reduction='none')
     optimizer = optim.Adam(neural_model.parameters())
 
     en_examples = []
@@ -48,41 +49,55 @@ def main():
                 logprob, next_symbol_score, seq2seq_logits) = neural_model(
                 train_ex.ar, train_ex.en)
 
+            en_mask = (train_ex.en != neural_model.en_pad).float()
+            ar_mask = (train_ex.ar != neural_model.ar_pad).float()
+            table_mask = (ar_mask.unsqueeze(2) * en_mask.unsqueeze(1)).float()
+
             loss = torch.tensor(0.)
             kl_loss = 0
             if args.em_loss is not None:
                 tgt_dim = action_scores.size(-1)
-                kl_loss = kl_div(
+                kl_loss_raw = kl_div(
                     action_scores.reshape(-1, tgt_dim),
-                    expected_counts.reshape(-1, tgt_dim))
+                    expected_counts.reshape(-1, tgt_dim)).sum(1)
+                kl_loss = (
+                    (kl_loss_raw * table_mask.reshape(-1)).sum() /
+                    table_mask.sum())
                 loss += args.em_loss * kl_loss
 
             nll_loss = 0
             if args.nll_loss is not None:
                 tgt_dim = next_symbol_score.size(-1)
-                nll_loss = nll(
+                nll_loss_raw = nll(
                     next_symbol_score.reshape(-1, tgt_dim),
                     train_ex.en[:, 1:].reshape(-1))
+                nll_loss = (
+                    (en_mask[:, 1:].reshape(-1) * nll_loss_raw).sum() /
+                    en_mask[:, 1:].sum())
                 loss += args.nll_loss * nll_loss
 
             seq2seq_loss = 0
             if args.s2s_loss is not None:
                 tgt_dim = seq2seq_logits.size(-1)
-                seq2seq_loss = xent(
+                seq2seq_loss_raw = xent(
                     seq2seq_logits[:, :-1].reshape(-1, tgt_dim),
                     train_ex.en[:, 1:].reshape(-1))
+                seq2seq_loss = (
+                    (en_mask[:, 1:].reshape(-1) * seq2seq_loss_raw).sum() /
+                    en_mask[:, 1:].sum())
                 loss += args.s2s_loss * seq2seq_loss
 
             loss.backward()
 
-            print(f"step: {pos_examples}, train loss = {loss:.3g} "
-                  f"(NLL {nll_loss:.3g}, "
-                  f"EM: {kl_loss:.3g}, "
-                  f"S2S: {seq2seq_loss:.3g})")
-            optimizer.step()
-            optimizer.zero_grad()
+            if pos_examples % args.delay_update == args.delay_update - 1:
+                print(f"step: {pos_examples}, train loss = {loss:.3g} "
+                      f"(NLL {nll_loss:.3g}, "
+                      f"EM: {kl_loss:.3g}, "
+                      f"S2S: {seq2seq_loss:.3g})")
+                optimizer.step()
+                optimizer.zero_grad()
 
-            if pos_examples % 50 == 49:
+            if pos_examples % (args.delay_update * 50) == args.delay_update * 50 - 1:
                 neural_model.eval()
 
                 ground_truth = []
