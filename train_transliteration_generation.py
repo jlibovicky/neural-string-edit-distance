@@ -22,7 +22,7 @@ def main():
     parser.add_argument("--s2s-loss", default=None, type=float)
     parser.add_argument("--hidden-size", default=64, type=int)
     parser.add_argument("--attention-heads", default=4, type=int)
-    parser.add_argument("--enc-dec-att", default=False, action="store_true")
+    parser.add_argument("--no-enc-dec-att", default=False, action="store_true")
     parser.add_argument("--layers", default=2, type=int)
     parser.add_argument("--batch-size", default=32, type=int)
     parser.add_argument("--delay-update", default=1, type=int,
@@ -35,7 +35,7 @@ def main():
 
     neural_model = EditDistNeuralModelProgressive(
         ar_text_field.vocab, en_text_field.vocab, directed=True,
-        encoder_decoder_attention=args.enc_dec_att)
+        encoder_decoder_attention=not args.no_enc_dec_att)
 
     kl_div = nn.KLDivLoss(reduction='none')
     nll = nn.NLLLoss(reduction='none')
@@ -63,7 +63,6 @@ def main():
             loss = torch.tensor(0.)
             kl_loss = 0
             if args.em_loss is not None:
-                import ipdb; ipdb.set_trace()
                 tgt_dim = action_scores.size(-1)
                 kl_loss_raw = kl_div(
                     action_scores.reshape(-1, tgt_dim),
