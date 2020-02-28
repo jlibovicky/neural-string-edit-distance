@@ -324,8 +324,9 @@ class EditDistNeuralModelConcurrent(EditDistBase):
 
 
 class EditDistNeuralModelProgressive(EditDistNeuralModelConcurrent):
-    def __init__(self, ar_vocab, en_vocab, directed=False,
+    def __init__(self, ar_vocab, en_vocab, directed=True,
                  hidden_dim=32, hidden_layers=2, attention_heads=4,
+                 encoder_decoder_attention=True,
                  start_symbol="<s>", end_symbol="</s>", pad_symbol="<pad>"):
         super(EditDistNeuralModelProgressive, self).__init__(
             ar_vocab, en_vocab, directed, full_table=False, tiny_table=False,
@@ -333,6 +334,7 @@ class EditDistNeuralModelProgressive(EditDistNeuralModelConcurrent):
             attention_heads=attention_heads,
             start_symbol=start_symbol, end_symbol=end_symbol, pad_symbol=pad_symbol)
 
+        self.encoder_decoder_attention = encoder_decoder_attention
         self.deletion_logit_proj = nn.Linear(self.hidden_dim, 1)
         self.insertion_proj = nn.Linear(self.hidden_dim, self.hidden_dim)
         self.substitution_proj = nn.Linear(self.hidden_dim, self.hidden_dim)
@@ -345,8 +347,7 @@ class EditDistNeuralModelProgressive(EditDistNeuralModelConcurrent):
         ar_len, en_len = ar_sent.size(1), en_sent.size(1)
         ar_vectors = self.ar_encoder(ar_sent)[0]
 
-        if self.directed:
-            # shift the en_sent even one more
+        if self.encoder_decoder_attention:
             en_vectors = self.en_encoder(
                 en_sent, encoder_hidden_states=ar_vectors)[0]
         else:
@@ -617,20 +618,6 @@ class EditDistStatModel(EditDistBase):
                 action_count[t, v] = best_action_count
 
         return torch.exp(alpha[-1, -1] / action_count[-1, -1])
-
-    def maximize_expectation(self, expectations):
-        epsilon = torch.log(torch.tensor(1e-16)) + \
-            torch.zeros_like(self.weights)
-        expecation_sum = torch.stack([epsilon] + expectations).logsumexp(0)
-        distribution = (
-            expecation_sum - expecation_sum.logsumexp(0, keepdim=True))
-
-        self.weights = torch.stack([
-            torch.log(torch.tensor(0.9)) + self.weights,
-            torch.log(torch.tensor(0.1)) + distribution]).logsumexp(0)
-
-        return (action_scores, torch.exp(expected_counts),
-                alpha[-1, -1], next_symbol_logprobs)
 
     def decode(self, ar_sent):
         en_sent = torch.tensor([[self.en_bos]])
