@@ -196,16 +196,13 @@ class EditDistNeuralModelConcurrent(EditDistBase):
 
                 to_sum = [beta[:, t, v]]
                 if v < en_len - 1:
-                    insertion_id = self._insertion_id(en_sent[:, v + 1])
-                    # The index of the plausible action is not index in the
-                    # beta table, but the index of the action which is one of
-                    # because of the backward direction.
-                    plausible_insertions[b_range, t, v + 1, insertion_id] = 0
+                    insertion_id = self._insertion_id(en_sent[:, v])
+                    plausible_insertions[b_range, t, v, insertion_id] = 0
 
                     # What would be the insertion score look like if there
                     # were anything to insert
                     insertion_score_candidate = (
-                        action_scores[b_range, t, v + 1, insertion_id] +
+                        action_scores[b_range, t, v, insertion_id] +
                         beta[:, t, v + 1])
 
                     # This keeps MINF before we get inside the words
@@ -214,11 +211,11 @@ class EditDistNeuralModelConcurrent(EditDistBase):
                         insertion_score_candidate,
                         torch.full_like(insertion_score_candidate, MINF)))
                 if t < ar_len - 1:
-                    deletion_id = self._deletion_id(ar_sent[:, t + 1])
-                    plausible_deletions[b_range, t + 1, v, deletion_id] = 0
+                    deletion_id = self._deletion_id(ar_sent[:, t])
+                    plausible_deletions[b_range, t, v, deletion_id] = 0
 
                     deletion_score_candidate = (
-                        action_scores[b_range, t + 1, v, deletion_id] +
+                        action_scores[b_range, t, v, deletion_id] +
                         beta[:, t + 1, v])
 
                     to_sum.append(torch.where(
@@ -227,12 +224,12 @@ class EditDistNeuralModelConcurrent(EditDistBase):
                         torch.full_like(deletion_score_candidate, MINF)))
                 if v < en_len - 1 and t < ar_len - 1:
                     subsitute_id = self._substitute_id(
-                        ar_sent[:, t + 1], en_sent[:, v + 1])
+                        ar_sent[:, t], en_sent[:, v])
                     plausible_substitutions[
-                        b_range, t + 1, v + 1, subsitute_id] = 0
+                        b_range, t, v, subsitute_id] = 0
 
                     substitution_score_candidate = (
-                        action_scores[b_range, t + 1, v + 1, subsitute_id] +
+                        action_scores[b_range, t, v, subsitute_id] +
                         beta[:, t + 1, v + 1])
 
                     to_sum.append(torch.where(
@@ -277,7 +274,7 @@ class EditDistNeuralModelConcurrent(EditDistBase):
             ar_sent, en_sent)
 
         alpha = self._forward_evaluation(ar_sent, en_sent, action_scores)
-        expected_counts = self._backward_evalatuion_and_expectation(
+        _, expected_counts = self._backward_evalatuion_and_expectation(
             ar_len, en_len, ar_sent, en_sent, alpha, action_scores)
 
         return (action_scores, torch.exp(expected_counts), alpha[0, -1, -1])
