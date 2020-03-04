@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import datetime
 
 import torch
 from torch import nn, optim
@@ -28,18 +29,26 @@ def main():
     parser.add_argument("--delay-update", default=1, type=int,
                         help="Update model every N steps.")
     parser.add_argument("--epochs", default=10, type=int)
+    parser.add_argument("--src-tokenized", default=False, action="store_true",
+                        help="If true, source side are space separated tokens.")
+    parser.add_argument("--tgt-tokenized", default=False, action="store_true",
+                        help="If true, target side are space separated tokens.")
     args = parser.parse_args()
 
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     ar_text_field, en_text_field, train_iter, val_iter, test_iter = \
-        load_transliteration_data(args.data_prefix, args.batch_size)
+        load_transliteration_data(
+            args.data_prefix, args.batch_size, device,
+            src_tokenized=args.src_tokenized,
+            tgt_tokenized=args.tgt_tokenized)
 
     neural_model = EditDistNeuralModelProgressive(
-        ar_text_field.vocab, en_text_field.vocab, directed=True,
-        encoder_decoder_attention=not args.no_enc_dec_att)
+        ar_text_field.vocab, en_text_field.vocab, device, directed=True,
+        encoder_decoder_attention=not args.no_enc_dec_att).to(device)
 
-    kl_div = nn.KLDivLoss(reduction='none')
-    nll = nn.NLLLoss(reduction='none')
-    xent = nn.CrossEntropyLoss(reduction='none')
+    kl_div = nn.KLDivLoss(reduction='none').to(device)
+    nll = nn.NLLLoss(reduction='none').to(device)
+    xent = nn.CrossEntropyLoss(reduction='none').to(device)
     optimizer = optim.Adam(neural_model.parameters())
 
     step = 0
@@ -53,14 +62,14 @@ def main():
             step += 1
 
             (action_scores, expected_counts,
-                logprob, next_symbol_score, seq2seq_logits) = neural_model(
+                logprob, next_symbol_score) = neural_model(
                 train_ex.ar, train_ex.en)
 
             en_mask = (train_ex.en != neural_model.en_pad).float()
             ar_mask = (train_ex.ar != neural_model.ar_pad).float()
             table_mask = (ar_mask.unsqueeze(2) * en_mask.unsqueeze(1)).float()
 
-            loss = torch.tensor(0.)
+            loss = torch.tensor(0.).to(device)
             kl_loss = 0
             if args.em_loss is not None:
                 tgt_dim = action_scores.size(-1)
@@ -77,6 +86,7 @@ def main():
                 tgt_dim = action_scores.size(-1)
                 # TODO do real sampling instead of argmax
                 sampled_actions = expected_counts.argmax(3)
+                #sampled_actions = torch.multinomial(expected_counts[:, 1:, 1:].reshape(-1, tgt_dim), 1)
                 sampled_em_loss_raw = xent(
                     action_scores[:, 1:, 1:].reshape(-1, tgt_dim),
                     sampled_actions[:, 1:, 1:].reshape(-1))
@@ -96,63 +106,43 @@ def main():
                     en_mask[:, 1:].sum())
                 loss += args.nll_loss * nll_loss
 
-            seq2seq_loss = 0
-            if args.s2s_loss is not None:
-                tgt_dim = seq2seq_logits.size(-1)
-                seq2seq_loss_raw = xent(
-                    seq2seq_logits[:, :-1].reshape(-1, tgt_dim),
-                    train_ex.en[:, 1:].reshape(-1))
-                seq2seq_loss = (
-                    (en_mask[:, 1:].reshape(-1) * seq2seq_loss_raw).sum() /
-                    en_mask[:, 1:].sum())
-                loss += args.s2s_loss * seq2seq_loss
-
             loss.backward()
 
             if step % args.delay_update == args.delay_update - 1:
-                print(f"step: {step}, train loss = {loss:.3g} "
+                stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
+                print(f"[{stamp}] step: {step}, train loss = {loss:.3g} "
                       f"(NLL {nll_loss:.3g}, "
                       f"EM: {kl_loss:.3g}, "
-                      f"sampled EM: {sampled_em_loss:.3g}, "
-                      f"S2S: {seq2seq_loss:.3g})")
+                      f"sampled EM: {sampled_em_loss:.3g})")
                 optimizer.step()
                 optimizer.zero_grad()
 
             if step % (args.delay_update * 50) == args.delay_update * 50 - 1:
                 neural_model.eval()
 
+                sources = []
                 ground_truth = []
                 hypotheses = []
 
                 for j, val_ex in enumerate(val_iter):
-
-                    # TODO when debugged: decode everything and measure
-                    # * probability of correct transliteration (sum & viterbi)
-                    # * edit distance of decoded
-                    # * accuracy of decoded
-
                     with torch.no_grad():
-                        src_string = decode_ids(val_ex.ar[0], ar_text_field)
-                        tgt_string = decode_ids(val_ex.en[0], en_text_field)
                         decoded_val = neural_model.decode(val_ex.ar)
-                        hypothesis = decode_ids(decoded_val[0], en_text_field)
 
-                        ground_truth.append(tgt_string)
-                        hypotheses.append(hypothesis)
+                        for ar, en, hyp in zip(val_ex.ar, val_ex.en, decoded_val):
+                            src_string = decode_ids(ar, ar_text_field, args.src_tokenized)
+                            tgt_string = decode_ids(en, en_text_field, args.tgt_tokenized)
+                            hypothesis = decode_ids(hyp, en_text_field, args.tgt_tokenized)
 
-                        if j < 5:
-                            # correct_prob = neural_model.viterbi(
-                            #     val_ex.ar, val_ex.en)
-                            # decoded_prob = neural_model.viterbi(
-                            #     val_ex.ar, decoded_val)
+                            sources.append(src_string)
+                            ground_truth.append(tgt_string)
+                            hypotheses.append(hypothesis)
 
-                            print()
-                            print(f"'{src_string}' -> '{hypothesis}' ({tgt_string})")
-                            # print(f"  hyp. prob.: {decoded_prob:.3f}, "
-                            #       f"correct prob.: {correct_prob:.3f}, "
-                            #       f"ratio: {decoded_prob / correct_prob:.3f}")
+                        if j == 0:
+                            for src, hyp, tgt in zip(sources[:10], hypotheses, ground_truth):
+                                print()
+                                print(f"'{src}' -> '{hyp}' ({tgt})")
 
-                        if j >= 50:
+                        if j >= 5:
                             break
 
                 print()
@@ -160,7 +150,7 @@ def main():
                 wer = 1 - sum(
                     float(gt == hyp) for gt, hyp
                     in zip(ground_truth, hypotheses)) / len(ground_truth)
-                cer = char_error_rate(hypotheses, ground_truth)
+                cer = char_error_rate(hypotheses, ground_truth, args.tgt_tokenized)
 
                 if wer < best_wer:
                     best_wer = wer
