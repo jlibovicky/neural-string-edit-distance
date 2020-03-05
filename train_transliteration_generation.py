@@ -33,6 +33,8 @@ def main():
                         help="If true, source side are space separated tokens.")
     parser.add_argument("--tgt-tokenized", default=False, action="store_true",
                         help="If true, target side are space separated tokens.")
+    parser.add_argument("--patience", default=20, type=int,
+                        help="Number of validations witout improvement before finishing.")
     args = parser.parse_args()
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -56,9 +58,14 @@ def main():
     best_wer_step = 0
     best_cer = 1.0
     best_cer_step = 0
+    stalled = 0
 
     for _ in range(args.epochs):
+        if stalled > args.patience:
+            break
         for i, train_ex in enumerate(train_iter):
+            if stalled > args.patience:
+                break
             step += 1
 
             (action_scores, expected_counts,
@@ -142,9 +149,6 @@ def main():
                                 print()
                                 print(f"'{src}' -> '{hyp}' ({tgt})")
 
-                        if j >= 5:
-                            break
-
                 print()
 
                 wer = 1 - sum(
@@ -152,17 +156,55 @@ def main():
                     in zip(ground_truth, hypotheses)) / len(ground_truth)
                 cer = char_error_rate(hypotheses, ground_truth, args.tgt_tokenized)
 
+                stalled += 1
                 if wer < best_wer:
                     best_wer = wer
                     best_wer_step = step
+                    stalled = 0
                 if cer < best_cer:
                     best_cer = cer
                     best_cer_step = step
+                    stalled = 0
 
                 print(f"WER: {wer:.3g}   (best {best_wer:.3g}, step {best_wer_step})")
                 print(f"CER: {cer:.3g}   (best {best_cer:.3g}, step {best_cer_step})")
+                if stalled > 0:
+                    print(f"Stalled {stalled} times.")
                 print()
                 neural_model.train()
+
+    print("TRAINING FINISHED, evaluating on test data")
+    print()
+    neural_model.eval()
+
+    for j, test_ex in enumerate(test_iter):
+        with torch.no_grad():
+            decoded_val = neural_model.decode(test_ex.ar)
+
+            for ar, en, hyp in zip(test_ex.ar, test_ex.en, decoded_val):
+                src_string = decode_ids(ar, ar_text_field, args.src_tokenized)
+                tgt_string = decode_ids(en, en_text_field, args.tgt_tokenized)
+                hypothesis = decode_ids(hyp, en_text_field, args.tgt_tokenized)
+
+                sources.append(src_string)
+                ground_truth.append(tgt_string)
+                hypotheses.append(hypothesis)
+
+            if j == 0:
+                for src, hyp, tgt in zip(sources[:10], hypotheses, ground_truth):
+                    print()
+                    print(f"'{src}' -> '{hyp}' ({tgt})")
+
+    print()
+
+    wer = 1 - sum(
+        float(gt == hyp) for gt, hyp
+        in zip(ground_truth, hypotheses)) / len(ground_truth)
+    cer = char_error_rate(hypotheses, ground_truth, args.tgt_tokenized)
+
+    print(f"WER: {wer:.3g}")
+    print(f"CER: {cer:.3g}")
+    print()
 
 
 if __name__ == "__main__":
