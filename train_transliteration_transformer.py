@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 
 import argparse
+import datetime
 
-from jiwer import wer
+from tensorboardX import SummaryWriter
 import torch
 from torch import nn, optim
 from torch.functional import F
@@ -100,6 +101,16 @@ def main():
     best_cer_step = 0
     stalled = 0
 
+    stamp = datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S-%f")
+    experiment_params = (
+        args.data_prefix.replace("/", "_") +
+        f"_hidden{args.hidden_size}" +
+        f"_attheads{args.attention_heads}" +
+        f"_layers{args.layers}" +
+        f"_batch{args.batch_size}" +
+        f"_patence{args.patience}")
+    tb_writer = SummaryWriter(f"runs/transformer_{experiment_params}_{stamp}")
+
     for _ in range(100):
         if stalled > args.patience:
             break
@@ -133,6 +144,7 @@ def main():
             optimizer.zero_grad()
 
             if step % 500 == 499:
+                tb_writer.add_scalar('train/nll', loss, step)
                 seq2seq.eval()
 
                 ground_truth = []
@@ -188,6 +200,10 @@ def main():
                 if stalled > 0:
                     print(f"Stalled {stalled} times.")
                 print()
+
+                tb_writer.add_scalar('val/cer', cer, step)
+                tb_writer.add_scalar('val/wer', wer, step)
+                tb_writer.flush()
                 seq2seq.train()
 
     print("TRAINING FINISHED, evaluating on test data")

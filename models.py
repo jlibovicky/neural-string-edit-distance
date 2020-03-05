@@ -335,9 +335,9 @@ class EditDistNeuralModelProgressive(EditDistNeuralModelConcurrent):
             start_symbol=start_symbol, end_symbol=end_symbol, pad_symbol=pad_symbol)
 
         self.encoder_decoder_attention = encoder_decoder_attention
-        self.deletion_logit_proj = nn.Linear(self.hidden_dim, 1)
-        self.insertion_proj = nn.Linear(self.hidden_dim, self.en_symbol_count)
-        self.substitution_proj = nn.Linear(self.hidden_dim, self.en_symbol_count)
+        self.deletion_logit_proj = nn.Linear(2 * self.hidden_dim, 1)
+        self.insertion_proj = nn.Linear(2 * self.hidden_dim, self.en_symbol_count)
+        self.substitution_proj = nn.Linear(2 * self.hidden_dim, self.en_symbol_count)
 
     def _action_scores(self, ar_sent, en_sent, inference=False):
         ar_len, en_len = ar_sent.size(1), en_sent.size(1)
@@ -352,6 +352,10 @@ class EditDistNeuralModelProgressive(EditDistNeuralModelConcurrent):
         feature_table = self.projection(torch.cat((
             ar_vectors.unsqueeze(2).repeat(1, 1, en_len, 1),
             en_vectors.unsqueeze(1).repeat(1, ar_len, 1, 1)), dim=3))
+
+        feature_table = torch.cat(
+            (feature_table, en_vectors.unsqueeze(1).repeat(1, ar_len, 1, 1)),
+            dim=3)
 
         # DELETION <<<
         valid_deletion_logits = self.deletion_logit_proj(feature_table[:, :-1])

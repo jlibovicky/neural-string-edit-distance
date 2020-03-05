@@ -3,6 +3,7 @@
 import argparse
 import datetime
 
+from tensorboardX import SummaryWriter
 import torch
 from torch import nn, optim
 from torch.functional import F
@@ -59,6 +60,19 @@ def main():
     best_cer = 1.0
     best_cer_step = 0
     stalled = 0
+
+    stamp = datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S-%f")
+    experiment_params = (
+        args.data_prefix.replace("/", "_") +
+        f"_hidden{args.hidden_size}" +
+        f"_attheads{args.attention_heads}" +
+        f"_layers{args.layers}" +
+        f"_batch{args.batch_size}" +
+        f"_patence{args.patience}" +
+        f"_nll{args.nll_loss}" +
+        f"_EMloss{args.em_loss}" +
+        f"_sampledEMloss{args.sampled_em_loss}")
+    tb_writer = SummaryWriter(f"runs/generation_{stamp}")
 
     for _ in range(args.epochs):
         if stalled > args.patience:
@@ -125,6 +139,10 @@ def main():
                 optimizer.zero_grad()
 
             if step % (args.delay_update * 50) == args.delay_update * 50 - 1:
+                tb_writer.add_scalar('train/loss', loss, step)
+                tb_writer.add_scalar('train/nll', nll_loss, step)
+                tb_writer.add_scalar('train/em_kl_div', kl_loss, step)
+                tb_writer.add_scalar('train/sampled_em_nll', sampled_em_loss, step)
                 neural_model.eval()
 
                 sources = []
@@ -171,6 +189,10 @@ def main():
                 if stalled > 0:
                     print(f"Stalled {stalled} times.")
                 print()
+
+                tb_writer.add_scalar('val/cer', cer, step)
+                tb_writer.add_scalar('val/wer', wer, step)
+                tb_writer.flush()
                 neural_model.train()
 
     print("TRAINING FINISHED, evaluating on test data")
