@@ -1,0 +1,5 @@
+pytorch
+torchtext
+transformers
+editdistance
+termcolor
