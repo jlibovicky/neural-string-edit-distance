@@ -22,6 +22,7 @@ def main():
     parser.add_argument("--sampled-em-loss", default=None, type=float)
     parser.add_argument("--nll-loss", default=None, type=float)
     parser.add_argument("--s2s-loss", default=None, type=float)
+    parser.add_argument("--model-type", default='transformer', choices=["transformer", "rnn"])
     parser.add_argument("--hidden-size", default=64, type=int)
     parser.add_argument("--attention-heads", default=4, type=int)
     parser.add_argument("--no-enc-dec-att", default=False, action="store_true")
@@ -47,6 +48,7 @@ def main():
 
     neural_model = EditDistNeuralModelProgressive(
         ar_text_field.vocab, en_text_field.vocab, device, directed=True,
+        model_type=args.model_type,
         encoder_decoder_attention=not args.no_enc_dec_att).to(device)
 
     kl_div = nn.KLDivLoss(reduction='none').to(device)
@@ -64,6 +66,7 @@ def main():
     stamp = datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S-%f")
     experiment_params = (
         args.data_prefix.replace("/", "_") +
+        f"_model{args.model_type}" +
         f"_hidden{args.hidden_size}" +
         f"_attheads{args.attention_heads}" +
         f"_layers{args.layers}" +
@@ -72,7 +75,7 @@ def main():
         f"_nll{args.nll_loss}" +
         f"_EMloss{args.em_loss}" +
         f"_sampledEMloss{args.sampled_em_loss}")
-    tb_writer = SummaryWriter(f"runs/generation_{stamp}")
+    tb_writer = SummaryWriter(f"runs/generation_{experiment_params}_{stamp}")
 
     for _ in range(args.epochs):
         if stalled > args.patience:

@@ -7,6 +7,8 @@ from torchtext import data
 
 from transformers import BertConfig, BertModel
 
+from rnn import RNNEncoder, RNNDecoder
+
 MINF = torch.log(torch.tensor(0.))
 
 
@@ -74,12 +76,14 @@ class EditDistBase(nn.Module):
 class EditDistNeuralModelConcurrent(EditDistBase):
     def __init__(self, ar_vocab, en_vocab, device, directed=False,
                  hidden_dim=32, hidden_layers=2, attention_heads=4,
+                 model_type="transformer",
                  start_symbol="<s>", end_symbol="</s>", pad_symbol="<pad>",
                  full_table=False, tiny_table=True):
         super(EditDistNeuralModelConcurrent, self).__init__(
             ar_vocab, en_vocab, start_symbol, end_symbol, pad_symbol,
             full_table=full_table, tiny_table=tiny_table)
 
+        self.model_type = model_type
         self.device = device
         self.directed = directed
         self.hidden_dim = hidden_dim
@@ -96,6 +100,13 @@ class EditDistNeuralModelConcurrent(EditDistBase):
         self.action_projection = nn.Linear(hidden_dim, self.n_target_classes)
 
     def _encoder_for_vocab(self, vocab, directed=False):
+        if self.model_type == "transformer":
+            return self._transformer_for_vocab(vocab, directed)
+        elif self.model_type == "rnn":
+            return self._rnn_for_vocab(vocab, directed)
+        raise ValueError(f"Uknown model type {self.model_type}.")
+
+    def _transformer_for_vocab(self, vocab, directed=False):
         config = BertConfig(
             vocab_size=len(vocab),
             is_decoder=directed,
@@ -109,12 +120,42 @@ class EditDistNeuralModelConcurrent(EditDistBase):
 
         return BertModel(config)
 
+    def _rnn_for_vocab(self, vocab, directed=False):
+        if not directed:
+            # TODO potential bug, in does not have to be ar_pad
+            return RNNEncoder(
+                vocab, self.ar_pad, self.hidden_dim,
+                self.hidden_dim, self.hidden_layers)
+        else:
+            return RNNDecoder(
+                vocab, self.en_pad, self.hidden_dim,
+                self.hidden_dim, self.hidden_layers)
+
+    def _encode_ar(self, inputs):
+        if self.model_type == "rnn":
+            return self.ar_encoder(inputs)
+        elif self.model_type == "transformer":
+            return self.ar_encoder(inputs)[0]
+
+    def _encode_en(self, inputs, ar_vectors, ar_mask):
+        if self.model_type == "transformer" and self.encoder_decoder_attention:
+            return self.en_encoder(
+                inputs, encoder_hidden_states=ar_vectors,
+                encoder_attention_mask=ar_mask)[0]
+        elif self.model_type == "transformer":
+            return self.en_encoder(inputs)[0]
+        elif self.model_type == "rnn" and self.encoder_decoder_attention:
+            return self.en_encoder(inputs, ar_vectors, ar_mask)
+        elif self.model_type == "rnn":
+            return self.en_encoder(inputs)
+        raise ValueError(f"Uknown model type {self.model_type}.")
+
     def _action_scores(self, ar_sent, en_sent, inference=False):
         # TODO masking when batched
         ar_len, en_len = ar_sent.size(1), en_sent.size(1)
         ar_vectors = self.ar_encoder(ar_sent)[0]
 
-        if self.directed:
+        if self.directed and self.model_type == "transformer":
             en_vectors = self.en_encoder(
                 en_sent, encoder_hidden_states=ar_vectors)[0]
         else:
@@ -326,10 +367,12 @@ class EditDistNeuralModelConcurrent(EditDistBase):
 class EditDistNeuralModelProgressive(EditDistNeuralModelConcurrent):
     def __init__(self, ar_vocab, en_vocab, device, directed=True,
                  hidden_dim=32, hidden_layers=2, attention_heads=4,
-                 encoder_decoder_attention=True,
+                 encoder_decoder_attention=True, model_type="transformer",
                  start_symbol="<s>", end_symbol="</s>", pad_symbol="<pad>"):
         super(EditDistNeuralModelProgressive, self).__init__(
-            ar_vocab, en_vocab, device, directed, full_table=False, tiny_table=False,
+            ar_vocab, en_vocab, device, directed, full_table=False,
+            tiny_table=False,
+            model_type=model_type,
             hidden_dim=hidden_dim, hidden_layers=hidden_layers,
             attention_heads=attention_heads,
             start_symbol=start_symbol, end_symbol=end_symbol, pad_symbol=pad_symbol)
@@ -341,13 +384,9 @@ class EditDistNeuralModelProgressive(EditDistNeuralModelConcurrent):
 
     def _action_scores(self, ar_sent, en_sent, inference=False):
         ar_len, en_len = ar_sent.size(1), en_sent.size(1)
-        ar_vectors = self.ar_encoder(ar_sent)[0]
-
-        if self.encoder_decoder_attention:
-            en_vectors = self.en_encoder(
-                en_sent, encoder_hidden_states=ar_vectors)[0]
-        else:
-            en_vectors = self.en_encoder(en_sent)[0]
+        ar_vectors = self._encode_ar(ar_sent)
+        en_vectors = self._encode_en(
+            en_sent, ar_vectors, ar_sent != self.ar_pad)
 
         feature_table = self.projection(torch.cat((
             ar_vectors.unsqueeze(2).repeat(1, 1, en_len, 1),
