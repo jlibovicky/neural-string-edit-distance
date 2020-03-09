@@ -122,33 +122,25 @@ class EditDistNeuralModelConcurrent(EditDistBase):
 
     def _rnn_for_vocab(self, vocab, directed=False):
         if not directed:
-            # TODO potential bug, in does not have to be ar_pad
             return RNNEncoder(
-                vocab, self.ar_pad, self.hidden_dim,
+                vocab, self.hidden_dim,
                 self.hidden_dim, self.hidden_layers)
         else:
             return RNNDecoder(
-                vocab, self.en_pad, self.hidden_dim,
+                vocab, self.hidden_dim,
                 self.hidden_dim, self.hidden_layers)
 
-    def _encode_ar(self, inputs):
-        if self.model_type == "rnn":
-            return self.ar_encoder(inputs)
-        elif self.model_type == "transformer":
-            return self.ar_encoder(inputs)[0]
+    def _encode_ar(self, inputs, mask):
+        return self.ar_encoder(inputs, attention_mask=mask)[0]
 
-    def _encode_en(self, inputs, ar_vectors, ar_mask):
-        if self.model_type == "transformer" and self.encoder_decoder_attention:
+    def _encode_en(self, inputs, mask, ar_vectors, ar_mask):
+        if self.encoder_decoder_attention:
             return self.en_encoder(
-                inputs, encoder_hidden_states=ar_vectors,
+                inputs, attention_mask=mask,
+                encoder_hidden_states=ar_vectors,
                 encoder_attention_mask=ar_mask)[0]
-        elif self.model_type == "transformer":
-            return self.en_encoder(inputs)[0]
-        elif self.model_type == "rnn" and self.encoder_decoder_attention:
-            return self.en_encoder(inputs, ar_vectors, ar_mask)
-        elif self.model_type == "rnn":
-            return self.en_encoder(inputs)
-        raise ValueError(f"Uknown model type {self.model_type}.")
+        return self.en_encoder(
+            inputs, attention_mask=mask)
 
     def _action_scores(self, ar_sent, en_sent, inference=False):
         # TODO masking when batched
@@ -384,9 +376,10 @@ class EditDistNeuralModelProgressive(EditDistNeuralModelConcurrent):
 
     def _action_scores(self, ar_sent, en_sent, inference=False):
         ar_len, en_len = ar_sent.size(1), en_sent.size(1)
-        ar_vectors = self._encode_ar(ar_sent)
-        en_vectors = self._encode_en(
-            en_sent, ar_vectors, ar_sent != self.ar_pad)
+        ar_mask = ar_sent != self.ar_pad
+        en_mask = en_sent != self.en_pad
+        ar_vectors = self._encode_ar(ar_sent, ar_mask)
+        en_vectors = self._encode_en(en_sent, en_mask, ar_vectors, ar_mask)
 
         feature_table = self.projection(torch.cat((
             ar_vectors.unsqueeze(2).repeat(1, 1, en_len, 1),
