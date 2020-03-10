@@ -305,6 +305,10 @@ class EditDistNeuralModelConcurrent(EditDistBase):
         return beta, expected_counts
 
     def forward(self, ar_sent, en_sent):
+        batch_size = ar_sent.size(0)
+        b_range = torch.arange(batch_size)
+        ar_lengths = (ar_sent != self.ar_pad).int().sum(1) - 1
+        en_lengths = (en_sent != self.en_pad).int().sum(1) - 1
         ar_len, en_len, feature_table, action_scores = self._action_scores(
             ar_sent, en_sent)
 
@@ -312,7 +316,8 @@ class EditDistNeuralModelConcurrent(EditDistBase):
         _, expected_counts = self._backward_evalatuion_and_expectation(
             ar_len, en_len, ar_sent, en_sent, alpha, action_scores)
 
-        return (action_scores, torch.exp(expected_counts), alpha[0, -1, -1])
+        return (action_scores, torch.exp(expected_counts),
+                alpha[b_range, ar_lengths, en_lengths])
 
     @torch.no_grad()
     def viterbi(self, ar_sent, en_sent):
@@ -354,6 +359,19 @@ class EditDistNeuralModelConcurrent(EditDistBase):
                 action_count[t, v] = best_action_count
 
         return torch.exp(alpha[-1, -1] / action_count[-1, -1])
+
+    @torch.no_grad()
+    def probabilities(self, ar_sent, en_sent):
+        batch_size = ar_sent.size(0)
+        b_range = torch.arange(batch_size)
+        ar_lengths = (ar_sent != self.ar_pad).int().sum(1) - 1
+        en_lengths = (en_sent != self.en_pad).int().sum(1) - 1
+        ar_len, en_len, feature_table, action_scores = self._action_scores(
+            ar_sent, en_sent)
+
+        alpha = self._forward_evaluation(ar_sent, en_sent, action_scores)
+
+        return alpha[b_range.to(self.device), ar_lengths, en_lengths]
 
 
 class EditDistNeuralModelProgressive(EditDistNeuralModelConcurrent):
