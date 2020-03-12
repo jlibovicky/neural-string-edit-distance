@@ -2,6 +2,7 @@
 
 import argparse
 import datetime
+from itertools import chain
 
 from tensorboardX import SummaryWriter
 import torch
@@ -9,13 +10,22 @@ from torch import nn, optim
 from torch.functional import F
 from transformers import BertConfig, BertModel, Model2Model
 
+from rnn import RNNEncoder, RNNDecoder
 from transliteration_utils import (
     load_transliteration_data, decode_ids, char_error_rate)
 
 
-def greedy_decode(encoder, decoder, src_batch, bos_token_id, eos_token_id, pad_token_id, device, max_len=100):
+def transposed_embeddings(decoder):
+    if isinstance(decoder, RNNDecoder):
+        return decoder.embeddings.weight.t()
+    return decoder.embeddings.word_embeddings.weight.t()
+
+
+def greedy_decode(
+        encoder, decoder, src_batch, bos_token_id, eos_token_id,
+        pad_token_id, device, max_len=100):
     input_mask = src_batch != pad_token_id
-    encoded, _ = encoder(src_batch)
+    encoded, _ = encoder(src_batch, attention_mask=input_mask)
     batch_size = encoded.size(0)
 
     finished = [torch.tensor([False for _ in range(batch_size)]).to(device)]
@@ -26,11 +36,12 @@ def greedy_decode(encoder, decoder, src_batch, bos_token_id, eos_token_id, pad_t
         decoder_input = torch.stack(decoded, dim=1)
         decoder_states, _ = decoder(
             decoder_input,
+            attention_mask=~torch.stack(finished, dim=1),
             encoder_hidden_states=encoded,
             encoder_attention_mask=input_mask)
         logits = torch.matmul(
             decoder_states,
-            decoder.embeddings.word_embeddings.weight.t())
+            transposed_embeddings(decoder))
         next_symbol = logits[:, -1].argmax(dim=1)
         decoded.append(next_symbol)
 
@@ -47,16 +58,21 @@ def greedy_decode(encoder, decoder, src_batch, bos_token_id, eos_token_id, pad_t
 def main():
     parser = argparse.ArgumentParser(__doc__)
     parser.add_argument("data_prefix", type=str)
+    parser.add_argument("--model-type", default='transformer',
+                        choices=["transformer", "rnn"])
     parser.add_argument("--hidden-size", default=64, type=int)
     parser.add_argument("--attention-heads", default=4, type=int)
     parser.add_argument("--layers", default=2, type=int)
     parser.add_argument("--batch-size", default=32, type=int)
-    parser.add_argument("--src-tokenized", default=False, action="store_true",
-                        help="If true, source side are space separated tokens.")
-    parser.add_argument("--tgt-tokenized", default=False, action="store_true",
-                        help="If true, target side are space separated tokens.")
-    parser.add_argument("--patience", default=10, type=int,
-                        help="Number of validations witout improvement before finishing.")
+    parser.add_argument(
+        "--src-tokenized", default=False, action="store_true",
+        help="If true, source side are space separated tokens.")
+    parser.add_argument(
+        "--tgt-tokenized", default=False, action="store_true",
+        help="If true, target side are space separated tokens.")
+    parser.add_argument(
+        "--patience", default=10, type=int,
+        help="Number of validations witout improvement before finishing.")
     args = parser.parse_args()
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -66,26 +82,34 @@ def main():
             src_tokenized=args.src_tokenized,
             tgt_tokenized=args.tgt_tokenized)
 
-    transformer_config = BertConfig(
-        vocab_size=len(ar_text_field.vocab),
-        is_decoder=False,
-        hidden_size=args.hidden_size,
-        num_hidden_layers=1,
-        num_attention_heads=4,
-        intermediate_size=2 * args.hidden_size,
-        hidden_act='relu',
-        hidden_dropout_prob=0.1,
-        attention_probs_dropout_prob=0.1)
-    encoder = BertModel(transformer_config)
+    if args.model_type == "transformer":
+        transformer_config = BertConfig(
+            vocab_size=len(ar_text_field.vocab),
+            is_decoder=False,
+            hidden_size=args.hidden_size,
+            num_hidden_layers=1,
+            num_attention_heads=4,
+            intermediate_size=2 * args.hidden_size,
+            hidden_act='relu',
+            hidden_dropout_prob=0.1,
+            attention_probs_dropout_prob=0.1)
+        encoder = BertModel(transformer_config).to(device)
 
-    transformer_config.is_decoder = True
-    transformer_config.vocab_size = len(en_text_field.vocab)
-    decoder = BertModel(transformer_config)
-
-    seq2seq = Model2Model(encoder, decoder).to(device)
+        transformer_config.is_decoder = True
+        transformer_config.vocab_size = len(en_text_field.vocab)
+        decoder = BertModel(transformer_config).to(device)
+    elif args.model_type == "rnn":
+        encoder = RNNEncoder(
+            ar_text_field.vocab, args.hidden_size, args.hidden_size,
+            args.layers, dropout=0.3).to(device)
+        decoder = RNNDecoder(
+            en_text_field.vocab, args.hidden_size, args.hidden_size,
+            args.layers, dropout=0.3).to(device)
+    else:
+        raise RuntimeError("Unknown model type.")
 
     nll = nn.CrossEntropyLoss().to(device)
-    optimizer = optim.Adam(seq2seq.parameters())
+    optimizer = optim.Adam(chain(encoder.parameters(), decoder.parameters()))
 
     en_bos_token_id = en_text_field.vocab.stoi[en_text_field.init_token]
     en_eos_token_id = en_text_field.vocab.stoi[en_text_field.eos_token]
@@ -130,7 +154,7 @@ def main():
                 encoder_attention_mask=encoder_mask)[0]
             logits = torch.matmul(
                 decoder_states,
-                decoder.embeddings.word_embeddings.weight.t())
+                transposed_embeddings(decoder))
 
             loss = nll(
                 logits.reshape([-1, len(en_text_field.vocab)]),
@@ -139,13 +163,15 @@ def main():
 
             if step % 50 == 49:
                 print(f"step: {step}, train loss = {loss:.3g}")
-            torch.nn.utils.clip_grad_norm_(seq2seq.parameters(), 1.0)
+            torch.nn.utils.clip_grad_norm_(
+                chain(encoder.parameters(), decoder.parameters()), 1.0)
             optimizer.step()
             optimizer.zero_grad()
 
             if step % 500 == 499:
                 tb_writer.add_scalar('train/nll', loss, step)
-                seq2seq.eval()
+                encoder.eval()
+                decoder.eval()
 
                 ground_truth = []
                 all_hypotheses = []
@@ -204,7 +230,8 @@ def main():
                 tb_writer.add_scalar('val/cer', cer, step)
                 tb_writer.add_scalar('val/wer', wer, step)
                 tb_writer.flush()
-                seq2seq.train()
+                encoder.train()
+                decoder.train()
 
     print("TRAINING FINISHED, evaluating on test data")
     print()

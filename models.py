@@ -501,9 +501,11 @@ class EditDistNeuralModelProgressive(NeuralEditDistBase):
                 alpha[:, :, 0] = log_ar_mask
                 continue
             deletion_id = self._deletion_id(ar_char)
-            alpha[:, t, 0] = action_scores[b_range, t, 0, deletion_id] + alpha[:, t - 1, 0]
+            alpha[:, t, 0] = (
+                action_scores[b_range, t, 0, deletion_id] + alpha[:, t - 1, 0])
 
-        finished = torch.full([batch_size], False, dtype=torch.bool).to(self.device)
+        finished = torch.full(
+            [batch_size], False, dtype=torch.bool).to(self.device)
         for v in range(1, 2 * ar_sent.size(1)):
             # From what we have, do a prediction what is the next symbol
             insertion_logits = (

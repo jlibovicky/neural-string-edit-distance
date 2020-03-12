@@ -21,7 +21,8 @@ def main():
     parser.add_argument("--em-loss", default=None, type=float)
     parser.add_argument("--sampled-em-loss", default=None, type=float)
     parser.add_argument("--nll-loss", default=None, type=float)
-    parser.add_argument("--model-type", default='transformer', choices=["transformer", "rnn"])
+    parser.add_argument("--model-type", default='transformer',
+                        choices=["transformer", "rnn"])
     parser.add_argument("--hidden-size", default=64, type=int)
     parser.add_argument("--attention-heads", default=4, type=int)
     parser.add_argument("--no-enc-dec-att", default=False, action="store_true")
@@ -147,7 +148,8 @@ def main():
                 tb_writer.add_scalar('train/loss', loss, step)
                 tb_writer.add_scalar('train/nll', nll_loss, step)
                 tb_writer.add_scalar('train/em_kl_div', kl_loss, step)
-                tb_writer.add_scalar('train/sampled_em_nll', sampled_em_loss, step)
+                tb_writer.add_scalar(
+                    'train/sampled_em_nll', sampled_em_loss, step)
                 neural_model.eval()
 
                 sources = []
@@ -159,9 +161,12 @@ def main():
                         decoded_val = neural_model.decode(val_ex.ar)
 
                         for ar, en, hyp in zip(val_ex.ar, val_ex.en, decoded_val):
-                            src_string = decode_ids(ar, ar_text_field, args.src_tokenized)
-                            tgt_string = decode_ids(en, en_text_field, args.tgt_tokenized)
-                            hypothesis = decode_ids(hyp, en_text_field, args.tgt_tokenized)
+                            src_string = decode_ids(
+                                ar, ar_text_field, args.src_tokenized)
+                            tgt_string = decode_ids(
+                                en, en_text_field, args.tgt_tokenized)
+                            hypothesis = decode_ids(
+                                hyp, en_text_field, args.tgt_tokenized)
 
                             sources.append(src_string)
                             ground_truth.append(tgt_string)
@@ -177,7 +182,8 @@ def main():
                 wer = 1 - sum(
                     float(gt == hyp) for gt, hyp
                     in zip(ground_truth, hypotheses)) / len(ground_truth)
-                cer = char_error_rate(hypotheses, ground_truth, args.tgt_tokenized)
+                cer = char_error_rate(
+                    hypotheses, ground_truth, args.tgt_tokenized)
 
                 stalled += 1
                 if wer < best_wer:
@@ -189,8 +195,10 @@ def main():
                     best_cer_step = step
                     stalled = 0
 
-                print(f"WER: {wer:.3g}   (best {best_wer:.3g}, step {best_wer_step})")
-                print(f"CER: {cer:.3g}   (best {best_cer:.3g}, step {best_cer_step})")
+                print(
+                    f"WER: {wer:.3g}   (best {best_wer:.3g}, step {best_wer_step})")
+                print(
+                    f"CER: {cer:.3g}   (best {best_cer:.3g}, step {best_cer_step})")
                 if stalled > 0:
                     print(f"Stalled {stalled} times.")
                 print()
