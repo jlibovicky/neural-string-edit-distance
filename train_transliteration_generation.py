@@ -21,7 +21,6 @@ def main():
     parser.add_argument("--em-loss", default=None, type=float)
     parser.add_argument("--sampled-em-loss", default=None, type=float)
     parser.add_argument("--nll-loss", default=None, type=float)
-    parser.add_argument("--s2s-loss", default=None, type=float)
     parser.add_argument("--model-type", default='transformer', choices=["transformer", "rnn"])
     parser.add_argument("--hidden-size", default=64, type=int)
     parser.add_argument("--attention-heads", default=4, type=int)
@@ -38,6 +37,9 @@ def main():
     parser.add_argument("--patience", default=20, type=int,
                         help="Number of validations witout improvement before finishing.")
     args = parser.parse_args()
+
+    if args.nll_loss is None and args.em_loss is None and args.sampled_em_loss is None:
+        parser.error("No loss was specified.")
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     ar_text_field, en_text_field, train_iter, val_iter, test_iter = \

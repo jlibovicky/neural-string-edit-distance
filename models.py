@@ -14,7 +14,7 @@ MINF = torch.log(torch.tensor(0.))
 
 class EditDistBase(nn.Module):
     def __init__(self, ar_vocab, en_vocab, start_symbol,
-                 end_symbol, pad_symbol, full_table=True, tiny_table=False):
+                 end_symbol, pad_symbol, table_type="full", extra_classes=0):
         super(EditDistBase, self).__init__()
 
         self.ar_bos = ar_vocab[start_symbol]
@@ -24,64 +24,72 @@ class EditDistBase(nn.Module):
         self.en_eos = en_vocab[end_symbol]
         self.en_pad = en_vocab[pad_symbol]
 
+        self.extra_classes = extra_classes
         self.ar_symbol_count = len(ar_vocab)
         self.en_symbol_count = len(en_vocab)
 
-        if full_table and tiny_table:
-            raise ValueError(
-                "Cannot use full table and tiny table at the same time.")
+        self.table_type = table_type
 
-        self.full_table = full_table
-        self.tiny_table = tiny_table
-
-        if full_table:
+        if table_type == "full":
+            self.deletion_classes = self.ar_symbol_count
+            self.insertion_classes = self.en_symbol_count
+            self.subs_classes = self.ar_symbol_count * self.en_symbol_count
             self.n_target_classes = (
-                1 +  # special termination symbol
+                self.extra_classes +
                 self.ar_symbol_count +  # delete source
                 self.en_symbol_count +  # insert target
                 self.ar_symbol_count * self.en_symbol_count)  # substitute
-        elif tiny_table:
-            self.n_target_classes = 4
+        elif table_type == "tiny":
+            self.deletion_classes = 1
+            self.insertion_classes = 1
+            self.subs_classes = 1
+            self.n_target_classes = self.extra_classes + 3
+        elif table_type == "vocab":
+            self.deletion_classes = 1
+            self.insertion_classes = self.en_symbol_count
+            self.subs_classes = self.en_symbol_count
+            self.n_target_classes = (
+                self.extra_classes + 1 + 2 * self.en_symbol_count)
         else:
-            self.n_target_classes = 1 + 2 * self.en_symbol_count
+            raise ValueError("Unknown table type.")
 
     def _deletion_id(self, ar_char):
-        if self.full_table:
-            return 1 + ar_char
-        if self.tiny_table:
-            return torch.zeros_like(ar_char)
-        else:
-            return torch.zeros_like(ar_char)
+        if self.table_type == "full":
+            return ar_char
+        return torch.zeros_like(ar_char)
 
     def _insertion_id(self, en_char):
-        if self.full_table:
-            return 1 + self.ar_symbol_count + en_char
-        if self.tiny_table:
+        if self.table_type == "full":
+            return self.ar_symbol_count + en_char
+        elif self.table_type == "tiny":
             return 1
-        else:
+        elif self.table_type == "vocab":
             return 1 + en_char
+        raise RuntimeError("Unknown table type.")
 
     def _substitute_id(self, ar_char, en_char):
-        if self.full_table:
-            subs_id = (1 + self.ar_symbol_count + self.en_symbol_count +
+        if self.table_type == "full":
+            subs_id = (self.ar_symbol_count + self.en_symbol_count +
                        self.en_symbol_count * ar_char + en_char)
             assert subs_id < self.n_target_classes
             return subs_id
-        if self.tiny_table:
+        elif self.table_type == "tiny":
             return 2
-        else:
+        elif self.table_type == "vocab":
             return 1 + self.en_symbol_count + en_char
+        raise RuntimeError("Unknown table type.")
 
 
-class EditDistNeuralModelConcurrent(EditDistBase):
+class NeuralEditDistBase(EditDistBase):
     def __init__(self, ar_vocab, en_vocab, device, directed=False,
+                 encoder_decoder_attention=True,
+                 table_type="vocab", extra_classes=0,
                  hidden_dim=32, hidden_layers=2, attention_heads=4,
                  model_type="transformer",
-                 start_symbol="<s>", end_symbol="</s>", pad_symbol="<pad>",
-                 full_table=False, tiny_table=True):
-        super(EditDistNeuralModelConcurrent, self).__init__(
+                 start_symbol="<s>", end_symbol="</s>", pad_symbol="<pad>"):
+        super(NeuralEditDistBase, self).__init__(
             ar_vocab, en_vocab, start_symbol, end_symbol, pad_symbol,
-            full_table=full_table, tiny_table=tiny_table)
+            table_type=table_type, extra_classes=extra_classes)
 
         self.model_type = model_type
         self.device = device
@@ -97,7 +105,15 @@ class EditDistNeuralModelConcurrent(EditDistBase):
             nn.Linear(2 * hidden_dim, hidden_dim),
             nn.Dropout(0.3),
             nn.ReLU())
-        self.action_projection = nn.Linear(hidden_dim, self.n_target_classes)
+
+        self.encoder_decoder_attention = encoder_decoder_attention
+        self.deletion_logit_proj = nn.Linear(
+            2 * self.hidden_dim, self.deletion_classes)
+        self.insertion_proj = nn.Linear(
+            2 * self.hidden_dim, self.insertion_classes)
+        self.substitution_proj = nn.Linear(
+            2 * self.hidden_dim, self.subs_classes)
+        self.extra_proj = nn.Linear(2 * self.hidden_dim, self.extra_classes)
 
     def _encoder_for_vocab(self, vocab, directed=False):
         if self.model_type == "transformer":
@@ -140,26 +156,68 @@ class EditDistNeuralModelConcurrent(EditDistBase):
                 encoder_hidden_states=ar_vectors,
                 encoder_attention_mask=ar_mask)[0]
         return self.en_encoder(
-            inputs, attention_mask=mask)
+            inputs, attention_mask=mask)[0]
 
     def _action_scores(self, ar_sent, en_sent, inference=False):
-        # TODO masking when batched
         ar_len, en_len = ar_sent.size(1), en_sent.size(1)
-        ar_vectors = self.ar_encoder(ar_sent)[0]
-
-        if self.directed and self.model_type == "transformer":
-            en_vectors = self.en_encoder(
-                en_sent, encoder_hidden_states=ar_vectors)[0]
-        else:
-            en_vectors = self.en_encoder(en_sent)[0]
+        ar_mask = ar_sent != self.ar_pad
+        en_mask = en_sent != self.en_pad
+        ar_vectors = self._encode_ar(ar_sent, ar_mask)
+        en_vectors = self._encode_en(en_sent, en_mask, ar_vectors, ar_mask)
 
         feature_table = self.projection(torch.cat((
             ar_vectors.unsqueeze(2).repeat(1, 1, en_len, 1),
             en_vectors.unsqueeze(1).repeat(1, ar_len, 1, 1)), dim=3))
-        action_scores = F.log_softmax(
-            self.action_projection(feature_table), dim=3)
 
-        return ar_len, en_len, feature_table, action_scores
+        feature_table = torch.cat(
+            (feature_table, en_vectors.unsqueeze(1).repeat(1, ar_len, 1, 1)),
+            dim=3)
+
+        # DELETION <<<
+        valid_deletion_logits = self.deletion_logit_proj(feature_table[:, :-1])
+        deletion_padding = torch.full_like(valid_deletion_logits[:, :1], MINF)
+        padded_deletion_logits = torch.cat(
+            (deletion_padding, valid_deletion_logits), dim=1)
+
+        # INSERTIONS <<<
+        valid_insertion_logits = self.insertion_proj(feature_table[:, :, :-1])
+        insertion_padding = torch.full((
+            valid_insertion_logits.size(0),
+            valid_insertion_logits.size(1), 1,
+            valid_insertion_logits.size(3)), MINF).to(self.device)
+        padded_insertion_logits = torch.cat(
+            (insertion_padding, valid_insertion_logits), dim=2)
+
+        # SUBSITUTION <<<
+        valid_subs_logits = self.substitution_proj(feature_table[:, :-1, :-1])
+        src_subs_padding = torch.full_like(valid_subs_logits[:, :1], MINF)
+        src_padded_subs_logits = torch.cat(
+            (src_subs_padding, valid_subs_logits), dim=1)
+        tgt_subs_padding = torch.full((
+            src_padded_subs_logits.size(0),
+            src_padded_subs_logits.size(1), 1,
+            src_padded_subs_logits.size(3)), MINF).to(self.device)
+        padded_subs_logits = torch.cat(
+            (tgt_subs_padding, src_padded_subs_logits), dim=2)
+
+        actions_to_concat = [
+            padded_deletion_logits, padded_insertion_logits,
+            padded_subs_logits]
+
+        if self.extra_classes > 0:
+            extra_logits = self.extra_proj(feature_table)
+            actions_to_concat.append(extra_logits)
+
+        action_scores = F.log_softmax(torch.cat(
+            actions_to_concat, dim=3), dim=3)
+
+        assert action_scores.size(1) == ar_len
+        assert action_scores.size(2) == en_len
+        assert action_scores.size(3) == self.n_target_classes
+
+        return (ar_len, en_len, feature_table, action_scores,
+                valid_insertion_logits,
+                valid_subs_logits)
 
     def _forward_evaluation(self, ar_sent, en_sent, action_scores):
         """Differentiable forward pass through the model."""
@@ -304,12 +362,25 @@ class EditDistNeuralModelConcurrent(EditDistBase):
         expected_counts -= expected_counts.logsumexp(3, keepdim=True)
         return beta, expected_counts
 
+
+class EditDistNeuralModelConcurrent(NeuralEditDistBase):
+    def __init__(self, ar_vocab, en_vocab, device, directed=False,
+                 hidden_dim=32, hidden_layers=2, attention_heads=4,
+                 model_type="transformer",
+                 start_symbol="<s>", end_symbol="</s>", pad_symbol="<pad>"):
+        super(EditDistNeuralModelConcurrent, self).__init__(
+            ar_vocab, en_vocab, device, directed,
+            encoder_decoder_attention=False,
+            table_type="tiny", extra_classes=1,
+            start_symbol=start_symbol, end_symbol=end_symbol,
+            pad_symbol=pad_symbol)
+
     def forward(self, ar_sent, en_sent):
         batch_size = ar_sent.size(0)
         b_range = torch.arange(batch_size)
         ar_lengths = (ar_sent != self.ar_pad).int().sum(1) - 1
         en_lengths = (en_sent != self.en_pad).int().sum(1) - 1
-        ar_len, en_len, feature_table, action_scores = self._action_scores(
+        ar_len, en_len, feature_table, action_scores, _, _ = self._action_scores(
             ar_sent, en_sent)
 
         alpha = self._forward_evaluation(ar_sent, en_sent, action_scores)
@@ -366,7 +437,7 @@ class EditDistNeuralModelConcurrent(EditDistBase):
         b_range = torch.arange(batch_size)
         ar_lengths = (ar_sent != self.ar_pad).int().sum(1) - 1
         en_lengths = (en_sent != self.en_pad).int().sum(1) - 1
-        ar_len, en_len, feature_table, action_scores = self._action_scores(
+        ar_len, en_len, feature_table, action_scores, _, _ = self._action_scores(
             ar_sent, en_sent)
 
         alpha = self._forward_evaluation(ar_sent, en_sent, action_scores)
@@ -374,80 +445,22 @@ class EditDistNeuralModelConcurrent(EditDistBase):
         return alpha[b_range.to(self.device), ar_lengths, en_lengths]
 
 
-class EditDistNeuralModelProgressive(EditDistNeuralModelConcurrent):
+class EditDistNeuralModelProgressive(NeuralEditDistBase):
     def __init__(self, ar_vocab, en_vocab, device, directed=True,
                  hidden_dim=32, hidden_layers=2, attention_heads=4,
                  encoder_decoder_attention=True, model_type="transformer",
                  start_symbol="<s>", end_symbol="</s>", pad_symbol="<pad>"):
         super(EditDistNeuralModelProgressive, self).__init__(
-            ar_vocab, en_vocab, device, directed, full_table=False,
-            tiny_table=False,
+            ar_vocab, en_vocab, device, directed, table_type="vocab",
             model_type=model_type,
+            encoder_decoder_attention=encoder_decoder_attention,
             hidden_dim=hidden_dim, hidden_layers=hidden_layers,
             attention_heads=attention_heads,
-            start_symbol=start_symbol, end_symbol=end_symbol, pad_symbol=pad_symbol)
-
-        self.encoder_decoder_attention = encoder_decoder_attention
-        self.deletion_logit_proj = nn.Linear(2 * self.hidden_dim, 1)
-        self.insertion_proj = nn.Linear(2 * self.hidden_dim, self.en_symbol_count)
-        self.substitution_proj = nn.Linear(2 * self.hidden_dim, self.en_symbol_count)
-
-    def _action_scores(self, ar_sent, en_sent, inference=False):
-        ar_len, en_len = ar_sent.size(1), en_sent.size(1)
-        ar_mask = ar_sent != self.ar_pad
-        en_mask = en_sent != self.en_pad
-        ar_vectors = self._encode_ar(ar_sent, ar_mask)
-        en_vectors = self._encode_en(en_sent, en_mask, ar_vectors, ar_mask)
-
-        feature_table = self.projection(torch.cat((
-            ar_vectors.unsqueeze(2).repeat(1, 1, en_len, 1),
-            en_vectors.unsqueeze(1).repeat(1, ar_len, 1, 1)), dim=3))
-
-        feature_table = torch.cat(
-            (feature_table, en_vectors.unsqueeze(1).repeat(1, ar_len, 1, 1)),
-            dim=3)
-
-        # DELETION <<<
-        valid_deletion_logits = self.deletion_logit_proj(feature_table[:, :-1])
-        deletion_padding = torch.zeros_like(valid_deletion_logits[:, :1]) + MINF
-        padded_deletion_logits = torch.cat(
-            (deletion_padding, valid_deletion_logits), dim=1)
-
-        # INSERTIONS <<<
-        valid_insertion_logits = self.insertion_proj(feature_table[:, :, :-1])
-        insertion_padding = torch.full((
-            valid_insertion_logits.size(0),
-            valid_insertion_logits.size(1), 1,
-            valid_insertion_logits.size(3)), MINF).to(self.device)
-        padded_insertion_logits = torch.cat(
-            (insertion_padding, valid_insertion_logits), dim=2)
-
-        # SUBSITUTION <<<
-        valid_subs_logits = self.substitution_proj(feature_table[:, :-1, :-1])
-        src_subs_padding = torch.full_like(valid_subs_logits[:, :1], MINF)
-        src_padded_subs_logits = torch.cat(
-            (src_subs_padding, valid_subs_logits), dim=1)
-        tgt_subs_padding = torch.full((
-            src_padded_subs_logits.size(0),
-            src_padded_subs_logits.size(1), 1,
-            src_padded_subs_logits.size(3)), MINF).to(self.device)
-        padded_subs_logits = torch.cat(
-            (tgt_subs_padding, src_padded_subs_logits), dim=2)
-
-        action_scores = F.log_softmax(torch.cat(
-            (padded_deletion_logits, padded_insertion_logits, padded_subs_logits),
-            dim=3), dim=3)
-
-        assert action_scores.size(1) == ar_len
-        assert action_scores.size(2) == en_len
-        assert action_scores.size(3) == self.n_target_classes
-
-        return (ar_len, en_len, en_vectors, feature_table, action_scores,
-                valid_insertion_logits,
-                valid_subs_logits)
+            start_symbol=start_symbol, end_symbol=end_symbol,
+            pad_symbol=pad_symbol)
 
     def forward(self, ar_sent, en_sent):
-        (ar_len, en_len, en_states, feature_table, action_scores,
+        (ar_len, en_len, feature_table, action_scores,
             insertion_logits, subs_logits) = self._action_scores(
                 ar_sent, en_sent)
 
@@ -473,7 +486,7 @@ class EditDistNeuralModelProgressive(EditDistNeuralModelConcurrent):
         b_range = torch.arange(batch_size)
 
         en_sent = torch.tensor([[self.en_bos]] * batch_size).to(self.device)
-        (ar_len, en_len, _, feature_table,
+        (ar_len, en_len, feature_table,
          action_scores, _, _) = self._action_scores(
             ar_sent, en_sent, inference=False)
         log_ar_mask = torch.where(
@@ -514,7 +527,7 @@ class EditDistNeuralModelProgressive(EditDistNeuralModelConcurrent):
 
             en_sent = torch.cat((en_sent, next_symbol), dim=1)
 
-            ar_len, en_len, _, feature_table, action_scores, _, _ = self._action_scores(
+            ar_len, en_len, feature_table, action_scores, _, _ = self._action_scores(
                 ar_sent, en_sent, inference=True)
             alpha = torch.cat(
                 (alpha, torch.full((batch_size, ar_len, 1),  MINF).to(self.device)), dim=2)
