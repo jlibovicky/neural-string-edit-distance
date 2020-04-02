@@ -76,7 +76,7 @@ def main():
                 (action_mask * pos_mask).reshape(-1) * pos_samples_loss).mean()
             neg_loss = (
                 (action_mask * neg_mask).reshape(-1) * neg_samples_loss).mean()
-            loss = pos_loss + neg_loss #+ bce_loss
+            loss = pos_loss + neg_loss + bce_loss
 
             loss.backward()
 

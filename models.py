@@ -95,31 +95,41 @@ class NeuralEditDistBase(EditDistBase):
         self.device = device
         self.directed = directed
         self.hidden_dim = hidden_dim
+        if self.model_type == "bert":
+            self.hidden_dim = 768
         self.hidden_layers = hidden_layers
         self.attention_heads = attention_heads
         self.ar_encoder = self._encoder_for_vocab(ar_vocab)
-        self.en_encoder = self._encoder_for_vocab(en_vocab, directed=directed)
+        if model_type == "bert":
+            self.en_encoder = self.ar_encoder
+        else:
+            self.en_encoder = self._encoder_for_vocab(en_vocab, directed=directed)
 
         self.projection = nn.Sequential(
             nn.Dropout(0.3),
-            nn.Linear(2 * hidden_dim, hidden_dim),
+            nn.Linear(2 * self.hidden_dim, self.hidden_dim),
             nn.Dropout(0.3),
             nn.ReLU())
 
         self.encoder_decoder_attention = encoder_decoder_attention
+
+        proj_source = 2 * self.hidden_dim if self.directed else self.hidden_dim
+
         self.deletion_logit_proj = nn.Linear(
-            2 * self.hidden_dim, self.deletion_classes)
+            proj_source, self.deletion_classes)
         self.insertion_proj = nn.Linear(
-            2 * self.hidden_dim, self.insertion_classes)
+            proj_source, self.insertion_classes)
         self.substitution_proj = nn.Linear(
-            2 * self.hidden_dim, self.subs_classes)
-        self.extra_proj = nn.Linear(2 * self.hidden_dim, self.extra_classes)
+            proj_source, self.subs_classes)
+        self.extra_proj = nn.Linear(proj_source, self.extra_classes)
 
     def _encoder_for_vocab(self, vocab, directed=False):
         if self.model_type == "transformer":
             return self._transformer_for_vocab(vocab, directed)
         elif self.model_type == "rnn":
             return self._rnn_for_vocab(vocab, directed)
+        elif self.model_type == "bert":
+            return BertModel.from_pretrained("bert-base-cased")
         raise ValueError(f"Uknown model type {self.model_type}.")
 
     def _transformer_for_vocab(self, vocab, directed=False):
@@ -169,9 +179,10 @@ class NeuralEditDistBase(EditDistBase):
             ar_vectors.unsqueeze(2).repeat(1, 1, en_len, 1),
             en_vectors.unsqueeze(1).repeat(1, ar_len, 1, 1)), dim=3))
 
-        feature_table = torch.cat(
-            (feature_table, en_vectors.unsqueeze(1).repeat(1, ar_len, 1, 1)),
-            dim=3)
+        if self.directed:
+            feature_table = torch.cat(
+                (feature_table, en_vectors.unsqueeze(1).repeat(1, ar_len, 1, 1)),
+                dim=3)
 
         # DELETION <<<
         valid_deletion_logits = self.deletion_logit_proj(feature_table[:, :-1])
@@ -373,7 +384,7 @@ class EditDistNeuralModelConcurrent(NeuralEditDistBase):
             encoder_decoder_attention=False,
             table_type="tiny", extra_classes=1,
             start_symbol=start_symbol, end_symbol=end_symbol,
-            pad_symbol=pad_symbol)
+            pad_symbol=pad_symbol, model_type=model_type)
 
     def forward(self, ar_sent, en_sent):
         batch_size = ar_sent.size(0)
@@ -442,7 +453,10 @@ class EditDistNeuralModelConcurrent(NeuralEditDistBase):
 
         alpha = self._forward_evaluation(ar_sent, en_sent, action_scores)
 
-        return alpha[b_range.to(self.device), ar_lengths, en_lengths]
+        max_lens = torch.max(ar_lengths, en_lengths).float()
+        log_probs = alpha[b_range.to(self.device), ar_lengths, en_lengths]
+
+        return log_probs.exp(), (log_probs / max_lens).exp()
 
 
 class EditDistNeuralModelProgressive(NeuralEditDistBase):
