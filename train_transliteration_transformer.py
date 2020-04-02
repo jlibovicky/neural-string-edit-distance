@@ -236,7 +236,8 @@ def main():
     print("TRAINING FINISHED, evaluating on test data")
     print()
 
-    seq2seq.eval()
+    encoder.eval()
+    decoder.eval()
     for j, test_batch in enumerate(test_iter):
         with torch.no_grad():
             src_string = [
