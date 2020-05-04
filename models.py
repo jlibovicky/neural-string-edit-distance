@@ -17,6 +17,9 @@ class EditDistBase(nn.Module):
                  end_symbol, pad_symbol, table_type="full", extra_classes=0):
         super(EditDistBase, self).__init__()
 
+        self.ar_vocab = ar_vocab
+        self.en_vocab = en_vocab
+
         self.ar_bos = ar_vocab[start_symbol]
         self.ar_eos = ar_vocab[end_symbol]
         self.ar_pad = ar_vocab[pad_symbol]
@@ -141,8 +144,8 @@ class NeuralEditDistBase(EditDistBase):
             num_attention_heads=self.attention_heads,
             intermediate_size=2 * self.hidden_dim,
             hidden_act='relu',
-            hidden_dropout_prob=0.3,
-            attention_probs_dropout_prob=0.3)
+            hidden_dropout_prob=0.1,
+            attention_probs_dropout_prob=0.1)
 
         return BertModel(config)
 
@@ -150,11 +153,12 @@ class NeuralEditDistBase(EditDistBase):
         if not directed:
             return RNNEncoder(
                 vocab, self.hidden_dim,
-                self.hidden_dim, self.hidden_layers)
+                self.hidden_dim, self.hidden_layers, dropout=0.1)
         else:
             return RNNDecoder(
                 vocab, self.hidden_dim,
-                self.hidden_dim, self.hidden_layers)
+                self.hidden_dim, self.hidden_layers, self.attention_heads,
+                output_proj=False, dropout=0.1)
 
     def _encode_ar(self, inputs, mask):
         return self.ar_encoder(inputs, attention_mask=mask)[0]
@@ -620,12 +624,26 @@ class EditDistNeuralModelProgressive(NeuralEditDistBase):
 
 class EditDistStatModel(EditDistBase):
     def __init__(self, ar_vocab, en_vocab, start_symbol="<s>",
-                 end_symbol="</s>", pad_symbol="<pad>"):
+                 end_symbol="</s>", pad_symbol="<pad>",
+                 identitiy_initialize=True):
         super(EditDistStatModel, self).__init__(
             ar_vocab, en_vocab, start_symbol, end_symbol, pad_symbol)
 
-        self.weights = torch.log(torch.tensor(
-            [1 / self.n_target_classes for _ in range(self.n_target_classes)]))
+        weights = torch.tensor([
+            1 / self.n_target_classes for _ in range(self.n_target_classes)])
+
+        if identitiy_initialize:
+            idenity_weight = [0. for _ in range(self.n_target_classes)]
+            id_count = 0
+            for idx, symbol in enumerate(self.ar_vocab.itos):
+                if symbol in self.en_vocab.stoi:
+                    idenity_weight[self._substitute_id(
+                        idx, self.en_vocab[symbol])] = 1.
+                    id_count += 1
+            idenity_weight_tensor = torch.tensor(idenity_weight) / id_count
+            weights = (weights + idenity_weight_tensor) / 2
+
+        self.weights = torch.log(weights)
 
     def forward(self, ar_sent, en_sent):
         ar_len, en_len = ar_sent.size(1), en_sent.size(1)
@@ -635,13 +653,10 @@ class EditDistStatModel(EditDistBase):
         plausible_insertions = torch.zeros(table_shape) + MINF
         plausible_substitutions = torch.zeros(table_shape) + MINF
 
-        ar_sent = ar_sent.transpose(0, 1)
-        en_sent = en_sent.transpose(0, 1)
-
         alpha = torch.zeros((ar_len, en_len)) + MINF
         alpha[0, 0] = 0
-        for t, ar_char in enumerate(ar_sent[:, 0]):
-            for v, en_char in enumerate(en_sent[:, 0]):
+        for t, ar_char in enumerate(ar_sent[0]):
+            for v, en_char in enumerate(en_sent[0]):
                 if t == 0 and v == 0:
                     continue
 
@@ -667,8 +682,8 @@ class EditDistStatModel(EditDistBase):
         beta = torch.zeros((ar_len, en_len)) + MINF
         beta[-1, -1] = 0.0
 
-        for t in reversed(range(ar_sent.size(1))):
-            for v in reversed(range(en_sent.size(1))):
+        for t in reversed(range(ar_len)):
+            for v in reversed(range(en_len)):
 
                 to_sum = [beta[t, v]]
                 if v < en_len - 1:
@@ -681,7 +696,7 @@ class EditDistStatModel(EditDistBase):
                         self.weights[deletion_id] + beta[t + 1, v])
                 if v < en_len - 1 and t < ar_len - 1:
                     subsitute_id = self._substitute_id(
-                        ar_sen[0, t + 1], en_sent[0, v + 1])
+                        ar_sent[0, t + 1], en_sent[0, v + 1])
                     to_sum.append(
                         self.weights[subsitute_id] + beta[t + 1, v + 1])
                 beta[t, v] = torch.logsumexp(torch.tensor(to_sum), dim=0)
@@ -715,14 +730,11 @@ class EditDistStatModel(EditDistBase):
     def viterbi(self, ar_sent, en_sent):
         ar_len, en_len = ar_sent.size(1), en_sent.size(1)
 
-        ar_sent = ar_sent.transpose(0, 1)
-        en_sent = en_sent.transpose(0, 1)
-
         action_count = torch.zeros((ar_len, en_len))
         alpha = torch.zeros((ar_len, en_len)) - MINF
         alpha[0, 0] = 0
-        for t, ar_char in enumerate(ar_sent[:, 0]):
-            for v, en_char in enumerate(en_sent[:, 0]):
+        for t, ar_char in enumerate(ar_sent[0]):
+            for v, en_char in enumerate(en_sent[0]):
                 if t == 0 and v == 0:
                     continue
 
