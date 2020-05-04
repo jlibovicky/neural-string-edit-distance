@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import copy
 import datetime
 from itertools import chain
 
@@ -13,6 +14,13 @@ from transformers import BertConfig, BertModel, Model2Model
 from rnn import RNNEncoder, RNNDecoder
 from transliteration_utils import (
     load_transliteration_data, decode_ids, char_error_rate)
+
+
+def keep_params(model_part):
+    state_dict = model_part.state_dict()
+    for key, value in state_dict.items():
+        state_dict[key] = value.cpu()
+    return copy.deepcopy(state_dict)
 
 
 def transposed_embeddings(decoder):
@@ -58,9 +66,11 @@ def greedy_decode(
 def main():
     parser = argparse.ArgumentParser(__doc__)
     parser.add_argument("data_prefix", type=str)
+    parser.add_argument("--epochs", default=100, type=int)
     parser.add_argument("--model-type", default='transformer',
                         choices=["transformer", "rnn"])
-    parser.add_argument("--hidden-size", default=64, type=int)
+    parser.add_argument("--embedding-dim", default=64, type=int)
+    parser.add_argument("--hidden-size", default=128, type=int)
     parser.add_argument("--attention-heads", default=4, type=int)
     parser.add_argument("--layers", default=2, type=int)
     parser.add_argument("--batch-size", default=32, type=int)
@@ -73,6 +83,8 @@ def main():
     parser.add_argument(
         "--patience", default=10, type=int,
         help="Number of validations witout improvement before finishing.")
+    parser.add_argument(
+        "--learning-rate", default=1e-4, type=float)
     args = parser.parse_args()
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -100,30 +112,34 @@ def main():
         decoder = BertModel(transformer_config).to(device)
     elif args.model_type == "rnn":
         encoder = RNNEncoder(
-            ar_text_field.vocab, args.hidden_size, args.hidden_size,
-            args.layers, dropout=0.3).to(device)
+            ar_text_field.vocab, args.hidden_size, args.embedding_dim,
+            args.layers, dropout=0.1).to(device)
         decoder = RNNDecoder(
-            en_text_field.vocab, args.hidden_size, args.hidden_size,
-            args.layers, dropout=0.3).to(device)
+            en_text_field.vocab, args.hidden_size, args.embedding_dim,
+            args.layers, attention_heads=args.attention_heads,
+            dropout=0.1, output_proj=True).to(device)
     else:
         raise RuntimeError("Unknown model type.")
 
     nll = nn.CrossEntropyLoss().to(device)
-    optimizer = optim.Adam(chain(encoder.parameters(), decoder.parameters()))
+    optimizer = optim.Adam(
+            chain(encoder.parameters(), decoder.parameters()),
+            lr=args.learning_rate)
 
     en_bos_token_id = en_text_field.vocab.stoi[en_text_field.init_token]
     en_eos_token_id = en_text_field.vocab.stoi[en_text_field.eos_token]
     en_pad_token_id = en_text_field.vocab.stoi[en_text_field.pad_token]
     ar_pad_token_id = ar_text_field.vocab.stoi[ar_text_field.pad_token]
 
-    en_examples = []
-    ar_examples = []
     step = 0
     best_wer = 1.0
     best_wer_step = 0
-    best_cer = 1.0
+    best_cer = 1e9
     best_cer_step = 0
     stalled = 0
+
+    best_params = None
+
 
     stamp = datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S-%f")
     experiment_params = (
@@ -135,10 +151,10 @@ def main():
         f"_patence{args.patience}")
     tb_writer = SummaryWriter(f"runs/transformer_{experiment_params}_{stamp}")
 
-    for _ in range(100):
+    for _ in range(args.epochs):
         if stalled > args.patience:
             break
-        for i, train_batch in enumerate(train_iter):
+        for train_batch in train_iter:
             if stalled > args.patience:
                 break
             step += 1
@@ -199,7 +215,7 @@ def main():
                         ground_truth.extend(tgt_string)
                         all_hypotheses.extend(hypotheses)
 
-                        if j == 1:
+                        if j == 0:
                             for k in range(10):
                                 print()
                                 print(f"'{src_string[k]}' -> "
@@ -221,10 +237,14 @@ def main():
                     best_cer_step = step
                     stalled = 0
 
-                print(f"WER: {wer:.3g}   (best {best_wer:.3g}, step {best_wer_step})")
-                print(f"CER: {cer:.3g}   (best {best_cer:.3g}, step {best_cer_step})")
+                print(f"WER: {wer:.3g}   (best {best_wer:.3g}, "
+                      f"step {best_wer_step})")
+                print(f"CER: {cer:.3g}   (best {best_cer:.3g}, "
+                      f"step {best_cer_step})")
                 if stalled > 0:
                     print(f"Stalled {stalled} times.")
+                else:
+                    best_params = keep_params(encoder), keep_params(decoder)
                 print()
 
                 tb_writer.add_scalar('val/cer', cer, step)
@@ -238,13 +258,24 @@ def main():
 
     encoder.eval()
     decoder.eval()
+
+    for key, value in best_params[0].items():
+        best_params[0][key] = value.cuda()
+    encoder.load_state_dict(best_params[0])
+
+    for key, value in best_params[1].items():
+        best_params[1][key] = value.cuda()
+    decoder.load_state_dict(best_params[1])
+
     for j, test_batch in enumerate(test_iter):
         with torch.no_grad():
             src_string = [
-                decode_ids(test_ex, ar_text_field, tokenized=args.src_tokenized)
+                decode_ids(test_ex, ar_text_field,
+                           tokenized=args.src_tokenized)
                 for test_ex in test_batch.ar]
             tgt_string = [
-                decode_ids(test_ex, en_text_field, tokenized=args.tgt_tokenized)
+                decode_ids(test_ex, en_text_field,
+                           tokenized=args.tgt_tokenized)
                 for test_ex in test_batch.en]
 
             decoded_val = greedy_decode(
@@ -265,9 +296,10 @@ def main():
     wer = 1 - sum(
         float(gt == hyp) for gt, hyp
         in zip(ground_truth, all_hypotheses)) / len(ground_truth)
-
-    cer = char_error_rate(all_hypotheses, ground_truth, tokenized=args.tgt_tokenized)
     print(f"WER: {wer:.3g}")
+
+    cer = char_error_rate(
+        all_hypotheses, ground_truth, tokenized=args.tgt_tokenized)
     print(f"CER: {cer:.3g}")
 
 
