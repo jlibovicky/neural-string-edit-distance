@@ -125,10 +125,10 @@ class RNNDecoder(nn.Module):
                 nn.Dropout(dropout),
                 nn.Linear(hidden_size, embedding_size))
 
-    def forward(self, input_sequence, attention_mask, encoder_hidden_states=None, encoder_attention_mask=None):
+    def forward(self, input_ids, attention_mask, encoder_hidden_states=None, encoder_attention_mask=None):
         input_lengths = attention_mask.sum(1)
 
-        word_embeddings = self.dropout(self.embeddings(input_sequence))
+        word_embeddings = self.dropout(self.embeddings(input_ids))
         packed_embeddings = nn.utils.rnn.pack_padded_sequence(
             word_embeddings, input_lengths, batch_first=True, enforce_sorted=False)
 
