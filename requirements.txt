@@ -1,4 +1,4 @@
-pytorch
+torch
 torchtext
 transformers
 editdistance
