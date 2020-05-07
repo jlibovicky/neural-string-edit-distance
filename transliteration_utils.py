@@ -30,7 +30,14 @@ def load_transliteration_data(data_prefix, batch_size, device, src_tokenized=Fal
 def decode_ids(ids_list, field, tokenized=False):
     separator = " " if tokenized else ""
     chars = [field.vocab.itos[i] for i in ids_list]
-    return separator.join([c for c in chars if c[0] != "<" and c[-1] != ">"])
+    if chars[0] == "<s>":
+        chars = chars[1:]
+    real_chars = []
+    for char in chars:
+        if char in ["<s>", "</s>", "<pad>"]:
+            break
+        real_chars.append(char)
+    return separator.join(real_chars)
 
 
 def char_error_rate(hyps, refs, tokenized=False):
@@ -39,6 +46,9 @@ def char_error_rate(hyps, refs, tokenized=False):
         if tokenized:
             hyp, ref = hyp.split(), ref.split()
         edit_ops = editdistance.eval(hyp, ref)
+        if not ref:
+            # TODO this is a BUG and needs to be fixed
+            continue
         cers.append(edit_ops / len(ref))
     return sum(cers) / len(cers)
 
