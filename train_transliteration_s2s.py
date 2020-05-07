@@ -4,6 +4,7 @@ import argparse
 import copy
 import datetime
 from itertools import chain
+import logging
 
 from tensorboardX import SummaryWriter
 import torch
@@ -11,6 +12,7 @@ from torch import nn, optim
 from torch.functional import F
 from transformers import BertConfig, BertModel
 
+from experiment import experiment_logging, get_timestamp
 from rnn import RNNEncoder, RNNDecoder
 from transliteration_utils import (
     load_transliteration_data, decode_ids, char_error_rate)
@@ -84,14 +86,12 @@ def beam_search(
     while cur_len < max_len:
         flat_decoded = decoded.reshape(-1, cur_len)
         flat_finished = finished.reshape(-1, cur_len)
-        model_inputs = {
-            "input_ids": flat_decoded,
-            "attention_mask": ~flat_finished,
-            "encoder_hidden_states": encoded,
-            "encoder_attention_mask": input_mask
-        }
 
-        outputs = decoder(**model_inputs)
+        outputs = decoder(
+            input_ids=flat_decoded,
+            attention_mask=~flat_finished,
+            encoder_hidden_states=encoded,
+            encoder_attention_mask=input_mask)
         next_token_logprobs = F.log_softmax(torch.matmul(
             outputs[0][:, -1, :],
             transposed_embeddings(decoder)), dim=1)
@@ -175,6 +175,9 @@ def main():
     parser.add_argument(
         "--learning-rate", default=1e-4, type=float)
     args = parser.parse_args()
+
+    experiment_dir = experiment_logging(
+        "s2s_transliteration_" + get_timestamp(), args)
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     ar_text_field, en_text_field, train_iter, val_iter, test_iter = \
@@ -267,7 +270,7 @@ def main():
             loss.backward()
 
             if step % 50 == 49:
-                print(f"step: {step}, train loss = {loss:.3g}")
+                logging.info(f"step: {step}, train loss = {loss:.3g}")
             torch.nn.utils.clip_grad_norm_(
                 chain(encoder.parameters(), decoder.parameters()), 1.0)
             optimizer.step()
@@ -311,11 +314,12 @@ def main():
 
                         if j == 0:
                             for k in range(10):
-                                print()
-                                print(f"'{src_string[k]}' -> "
-                                      f"'{hypotheses[k]}' ({tgt_string[k]})")
+                                logging.info("")
+                                logging.info(
+                                    f"'{src_string[k]}' -> "
+                                    f"'{hypotheses[k]}' ({tgt_string[k]})")
 
-                print()
+                logging.info("")
                 wer = 1 - sum(
                     float(gt == hyp) for gt, hyp
                     in zip(ground_truth, all_hypotheses)) / len(ground_truth)
@@ -331,15 +335,15 @@ def main():
                     best_cer_step = step
                     stalled = 0
 
-                print(f"WER: {wer:.3g}   (best {best_wer:.3g}, "
+                logging.info(f"WER: {wer:.3g}   (best {best_wer:.3g}, "
                       f"step {best_wer_step})")
-                print(f"CER: {cer:.3g}   (best {best_cer:.3g}, "
+                logging.info(f"CER: {cer:.3g}   (best {best_cer:.3g}, "
                       f"step {best_cer_step})")
                 if stalled > 0:
-                    print(f"Stalled {stalled} times.")
+                    logging.info(f"Stalled {stalled} times.")
                 else:
                     best_params = keep_params(encoder), keep_params(decoder)
-                print()
+                logging.info("")
 
                 tb_writer.add_scalar('val/cer', cer, step)
                 tb_writer.add_scalar('val/wer', wer, step)
@@ -347,8 +351,8 @@ def main():
                 encoder.train()
                 decoder.train()
 
-    print("TRAINING FINISHED, evaluating on test data")
-    print()
+    logging.info("TRAINING FINISHED, evaluating on test data")
+    logging.info("")
 
     encoder.eval()
     decoder.eval()
@@ -362,7 +366,7 @@ def main():
     decoder.load_state_dict(best_params[1])
 
     for beam_size in range(1, 30):
-        print(f"Beam size {beam_size}")
+        logging.info(f"Beam size {beam_size}")
         for j, test_batch in enumerate(test_iter):
             with torch.no_grad():
                 src_string = [
@@ -388,16 +392,16 @@ def main():
                 ground_truth.extend(tgt_string)
                 all_hypotheses.extend(hypotheses)
 
-        print()
+        logging.info("")
         wer = 1 - sum(
             float(gt == hyp) for gt, hyp
             in zip(ground_truth, all_hypotheses)) / len(ground_truth)
-        print(f"WER: {wer:.3g}")
+        logging.info(f"WER: {wer:.3g}")
 
         cer = char_error_rate(
             all_hypotheses, ground_truth, tokenized=args.tgt_tokenized)
-        print(f"CER: {cer:.3g}")
-        print("")
+        logging.info(f"CER: {cer:.3g}")
+        logging.info("")
 
 
 if __name__ == "__main__":
