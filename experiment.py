@@ -4,6 +4,8 @@ import os
 import subprocess
 import sys
 
+from typing import List
+
 import yaml
 
 logging.basicConfig(format='%(asctime)s %(message)s', level=logging.INFO)
@@ -44,3 +46,9 @@ def experiment_logging(experiment_id: str, args) -> str:
 
 def get_timestamp() -> str:
     return datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S-%f")
+
+
+def save_vocab(itos_list: List[str], path: str) -> None:
+    with open(path, "w") as file:
+        for item in itos_list:
+            print(item, file=file)
