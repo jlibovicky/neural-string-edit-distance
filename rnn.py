@@ -4,7 +4,7 @@
 from collections import namedtuple
 
 import torch
-from torch import nn, optim
+from torch import nn
 from torch.functional import F
 
 from transformers.modeling_bert import BertSelfAttention
