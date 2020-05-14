@@ -127,3 +127,11 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+
+**/*.swp
+**/*.swo
+data/
+experiments/
+cpu-evn/
+gpu-evn/
