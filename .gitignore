@@ -133,5 +133,5 @@ dmypy.json
 **/*.swo
 data/
 experiments/
-cpu-evn/
-gpu-evn/
+cpu-env/
+gpu-env/
