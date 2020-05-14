@@ -8,6 +8,7 @@ from torchtext import data
 from transformers import BertConfig, BertModel
 
 from rnn import RNNEncoder, RNNDecoder
+from cnn import CNNEncoder, CNNDecoder
 
 MINF = torch.log(torch.tensor(0.))
 
@@ -86,7 +87,9 @@ class EditDistBase(nn.Module):
 class NeuralEditDistBase(EditDistBase):
     def __init__(self, ar_vocab, en_vocab, device, directed=False,
                  encoder_decoder_attention=True,
+                 share_encoders=False,
                  table_type="vocab", extra_classes=0,
+                 window=3,
                  hidden_dim=32, hidden_layers=2, attention_heads=4,
                  model_type="transformer",
                  start_symbol="<s>", end_symbol="</s>", pad_symbol="<pad>"):
@@ -94,16 +97,25 @@ class NeuralEditDistBase(EditDistBase):
             ar_vocab, en_vocab, start_symbol, end_symbol, pad_symbol,
             table_type=table_type, extra_classes=extra_classes)
 
+        if directed and share_encoders:
+            raise ValueError(
+                "You cannot share encoder if one of them is decoder.")
+        if share_encoders:
+            if ar_vocab != en_vocab:
+                raise ValueError(
+                    "When sharing encoders, vocabularies must be the same.")
+
         self.model_type = model_type
         self.device = device
         self.directed = directed
         self.hidden_dim = hidden_dim
+        self.window = window
         if self.model_type == "bert":
             self.hidden_dim = 768
         self.hidden_layers = hidden_layers
         self.attention_heads = attention_heads
         self.ar_encoder = self._encoder_for_vocab(ar_vocab)
-        if model_type == "bert":
+        if model_type == "bert" or share_encoders:
             self.en_encoder = self.ar_encoder
         else:
             self.en_encoder = self._encoder_for_vocab(en_vocab, directed=directed)
@@ -133,6 +145,10 @@ class NeuralEditDistBase(EditDistBase):
             return self._rnn_for_vocab(vocab, directed)
         elif self.model_type == "bert":
             return BertModel.from_pretrained("bert-base-cased")
+        elif self.mode_type == "embeddings":
+            return self._cnn_for_vocab(vocab, directed, hidden=False)
+        elif self.mode_type == "cnn":
+            return self._cnn_for_vocab(vocab, directed, hidden=True)
         raise ValueError(f"Uknown model type {self.model_type}.")
 
     def _transformer_for_vocab(self, vocab, directed=False):
@@ -158,6 +174,23 @@ class NeuralEditDistBase(EditDistBase):
             return RNNDecoder(
                 vocab, self.hidden_dim,
                 self.hidden_dim, self.hidden_layers, self.attention_heads,
+                output_proj=False, dropout=0.1)
+
+    def _cnn_for_vocab(self, vocab, directed=False, hidden=True):
+        layers = self.hidden_layers if hidden else 0
+
+        if not directed:
+            return CNNEncoder(
+                vocab, self.hidden_dim,
+                self.hidden_dim,
+                window=self.window,
+                layers=layers, dropout=0.1)
+        else:
+            return CNNDecoder(
+                vocab, self.hidden_dim,
+                self.hidden_dim, layers=layers,
+                window=self.window,
+                attention_heads=self.attention_heads,
                 output_proj=False, dropout=0.1)
 
     def _encode_ar(self, inputs, mask):
@@ -381,14 +414,17 @@ class NeuralEditDistBase(EditDistBase):
 class EditDistNeuralModelConcurrent(NeuralEditDistBase):
     def __init__(self, ar_vocab, en_vocab, device, directed=False,
                  hidden_dim=32, hidden_layers=2, attention_heads=4,
+                 share_encoders=False,
                  model_type="transformer",
                  start_symbol="<s>", end_symbol="</s>", pad_symbol="<pad>"):
         super(EditDistNeuralModelConcurrent, self).__init__(
             ar_vocab, en_vocab, device, directed,
             encoder_decoder_attention=False,
+            share_encoders=share_encoders,
             table_type="tiny", extra_classes=1,
             start_symbol=start_symbol, end_symbol=end_symbol,
             pad_symbol=pad_symbol, model_type=model_type)
+
 
     def forward(self, ar_sent, en_sent):
         batch_size = ar_sent.size(0)
