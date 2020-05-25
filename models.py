@@ -411,6 +411,76 @@ class NeuralEditDistBase(EditDistBase):
         expected_counts -= expected_counts.logsumexp(3, keepdim=True)
         return beta, expected_counts
 
+    @torch.no_grad()
+    def viterbi(self, ar_sent, en_sent):
+        assert ar_sent.size(0) == 1
+        ar_len, en_len, _, action_scores, _, _ = self._action_scores(
+            ar_sent, en_sent)
+        action_scores = action_scores.squeeze(0)
+
+        action_count = torch.zeros((ar_len, en_len))
+        actions = torch.zeros((ar_len, en_len))
+        alpha = torch.zeros((ar_len, en_len)) + MINF
+        alpha[0, 0] = 0
+        for t, ar_char in enumerate(ar_sent[0]):
+            for v, en_char in enumerate(en_sent[0]):
+                if t == 0 and v == 0:
+                    continue
+
+                deletion_id = self._deletion_id(ar_char)
+                insertion_id = self._insertion_id(en_char)
+                subsitute_id = self._substitute_id(ar_char, en_char)
+
+                possible_actions = []
+
+                if v >= 1:
+                    possible_actions.append(
+                        (action_scores[t, v, insertion_id] + alpha[t, v - 1],
+                         action_count[t, v - 1] + 1, 0))
+                else:
+                    possible_actions.append((-1e12, 1.0, 0))
+                if t >= 1:
+                    possible_actions.append(
+                        (action_scores[t, v, deletion_id] + alpha[t - 1, v],
+                         action_count[t - 1, v] + 1, 1))
+                else:
+                    possible_actions.append((-1e12, 1.0, 1))
+                if v >= 1 and t >= 1:
+                    possible_actions.append(
+                        (action_scores[t, v, subsitute_id] + alpha[t - 1, v - 1],
+                         action_count[t - 1, v - 1] + 1, 2))
+                else:
+                    possible_actions.append((-1e12, 1.0, 2))
+
+                best_action_cost, best_action_count, best_action_id = max(
+                    possible_actions, key=lambda x: x[0])
+
+                alpha[t, v] = best_action_cost
+                action_count[t, v] = best_action_count
+                actions[t, v] = best_action_id
+
+        operations = []
+        t = ar_len - 1
+        v = en_len - 1
+        while t > 0 or v > 0:
+            if actions[t, v] == 1:
+                operations.append(("delete", ar_sent[0, t].cpu().numpy()))
+                t -= 1
+            elif actions[t, v] == 0:
+                operations.append(("insert", en_sent[0, v].cpu().numpy()))
+                v -= 1
+            elif actions[t, v] == 2:
+                operations.append(
+                    ("subs",
+                     (ar_sent[0, t].cpu().numpy(),
+                      en_sent[0, v].cpu().numpy())))
+                v -= 1
+                t -= 1
+        operations.reverse()
+
+        return (torch.exp(alpha[-1, -1] / action_count[-1, -1]),
+                operations)
+
 
 class EditDistNeuralModelConcurrent(NeuralEditDistBase):
     def __init__(self, ar_vocab, en_vocab, device, directed=False,
@@ -441,47 +511,6 @@ class EditDistNeuralModelConcurrent(NeuralEditDistBase):
 
         return (action_scores, torch.exp(expected_counts),
                 alpha[b_range, ar_lengths, en_lengths])
-
-    @torch.no_grad()
-    def viterbi(self, ar_sent, en_sent):
-        ar_len, en_len, _, action_scores = self._action_scores(
-            ar_sent, en_sent)
-        action_scores = action_scores.squeeze(0)
-
-        action_count = torch.zeros((ar_len, en_len))
-        alpha = torch.zeros((ar_len, en_len)) + MINF
-        alpha[0, 0] = 0
-        for t, ar_char in enumerate(ar_sent[0]):
-            for v, en_char in enumerate(en_sent[0]):
-                if t == 0 and v == 0:
-                    continue
-
-                deletion_id = self._deletion_id(ar_char)
-                insertion_id = self._insertion_id(en_char)
-                subsitute_id = self._substitute_id(ar_char, en_char)
-
-                possible_actions = []
-
-                if v >= 1:
-                    possible_actions.append(
-                        (action_scores[t, v, insertion_id] + alpha[t, v - 1],
-                         action_count[t, v - 1] + 1))
-                if t >= 1:
-                    possible_actions.append(
-                        (action_scores[t, v, deletion_id] + alpha[t - 1, v],
-                         action_count[t - 1, v] + 1))
-                if v >= 1 and t >= 1:
-                    possible_actions.append(
-                        (action_scores[t, v, subsitute_id] + alpha[t - 1, v - 1],
-                         action_count[t - 1, v - 1] + 1))
-
-                best_action_cost, best_action_count = max(
-                    possible_actions, key=lambda x: x[0] / x[1])
-
-                alpha[t, v] = best_action_cost
-                action_count[t, v] = best_action_count
-
-        return torch.exp(alpha[-1, -1] / action_count[-1, -1])
 
     @torch.no_grad()
     def probabilities(self, ar_sent, en_sent):
