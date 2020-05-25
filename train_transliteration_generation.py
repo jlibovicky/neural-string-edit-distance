@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 
 import argparse
-import datetime
+import logging
+import os
 
 from tensorboardX import SummaryWriter
 import torch
@@ -9,6 +10,7 @@ from torch import nn, optim
 from torch.functional import F
 from torchtext import data
 
+from experiment import experiment_logging, get_timestamp, save_vocab
 from models import (
     EditDistNeuralModelConcurrent, EditDistNeuralModelProgressive)
 from transliteration_utils import (
@@ -22,7 +24,9 @@ def main():
     parser.add_argument("--sampled-em-loss", default=None, type=float)
     parser.add_argument("--nll-loss", default=None, type=float)
     parser.add_argument("--model-type", default='transformer',
-                        choices=["transformer", "rnn"])
+                        choices=["transformer", "rnn", "embeddings", "cnn"])
+    parser.add_argument("--embedding-dim", default=64, type=int)
+    parser.add_argument("--window", default=3, type=int)
     parser.add_argument("--hidden-size", default=64, type=int)
     parser.add_argument("--attention-heads", default=4, type=int)
     parser.add_argument("--no-enc-dec-att", default=False, action="store_true")
@@ -35,12 +39,36 @@ def main():
                         help="If true, source side are space separated tokens.")
     parser.add_argument("--tgt-tokenized", default=False, action="store_true",
                         help="If true, target side are space separated tokens.")
-    parser.add_argument("--patience", default=20, type=int,
+    parser.add_argument("--patience", default=2, type=int,
                         help="Number of validations witout improvement before finishing.")
+    parser.add_argument("--lr-decrease-count", default=20, type=int,
+                        help="Number of validations witout improvement before finishing.")
+    parser.add_argument("--lr-decrease-ratio", default=0.7, type=float,
+                        help="Number of validations witout improvement before finishing.")
+    parser.add_argument("--learning-rate", default=1e-4, type=float)
     args = parser.parse_args()
 
     if args.nll_loss is None and args.em_loss is None and args.sampled_em_loss is None:
         parser.error("No loss was specified.")
+
+    experiment_params = (
+        args.data_prefix.replace("/", "_") +
+        f"_model{args.model_type}" +
+        f"_hidden{args.hidden_size}" +
+        f"_attheads{args.attention_heads}" +
+        f"_layers{args.layers}" +
+        f"_encdecatt{not args.no_enc_dec_att}" +
+        f"_window{args.window}" +
+        f"_batch{args.batch_size}" +
+        f"_dealy{args.delay_update}" +
+        f"_patence{args.patience}" +
+        f"_nll{args.nll_loss}" +
+        f"_EMloss{args.em_loss}" +
+        f"_sampledEMloss{args.sampled_em_loss}")
+    experiment_dir = experiment_logging(
+        f"edit_gen_{experiment_params}_{get_timestamp()}", args)
+    model_path = os.path.join(experiment_dir, "model.pt")
+    tb_writer = SummaryWriter(experiment_dir)
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     ar_text_field, en_text_field, train_iter, val_iter, test_iter = \
@@ -49,51 +77,57 @@ def main():
             src_tokenized=args.src_tokenized,
             tgt_tokenized=args.tgt_tokenized)
 
-    neural_model = EditDistNeuralModelProgressive(
+    save_vocab(
+        ar_text_field.vocab.itos, os.path.join(experiment_dir, "src_vocab"))
+    save_vocab(
+        en_text_field.vocab.itos, os.path.join(experiment_dir, "tgt_vocab"))
+
+    model = EditDistNeuralModelProgressive(
         ar_text_field.vocab, en_text_field.vocab, device, directed=True,
         model_type=args.model_type,
+        hidden_dim=args.hidden_size,
+        hidden_layers=args.layers,
+        attention_heads=args.attention_heads,
+        window=args.window,
         encoder_decoder_attention=not args.no_enc_dec_att).to(device)
 
     kl_div = nn.KLDivLoss(reduction='none').to(device)
     nll = nn.NLLLoss(reduction='none').to(device)
     xent = nn.CrossEntropyLoss(reduction='none').to(device)
-    optimizer = optim.Adam(neural_model.parameters())
+    optimizer = optim.Adam(
+            model.parameters(), lr=args.learning_rate)
 
     step = 0
-    best_wer = 1.0
+    best_wer = 1e9
     best_wer_step = 0
-    best_cer = 1.0
+    best_cer = 1e9
     best_cer_step = 0
     stalled = 0
-
-    stamp = datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S-%f")
-    experiment_params = (
-        args.data_prefix.replace("/", "_") +
-        f"_model{args.model_type}" +
-        f"_hidden{args.hidden_size}" +
-        f"_attheads{args.attention_heads}" +
-        f"_layers{args.layers}" +
-        f"_batch{args.batch_size}" +
-        f"_patence{args.patience}" +
-        f"_nll{args.nll_loss}" +
-        f"_EMloss{args.em_loss}" +
-        f"_sampledEMloss{args.sampled_em_loss}")
-    tb_writer = SummaryWriter(f"runs/generation_{experiment_params}_{stamp}")
+    learning_rate = args.learning_rate
+    remaining_decrease = args.lr_decrease_count
 
     for _ in range(args.epochs):
-        if stalled > args.patience:
+        if remaining_decrease <= 0:
             break
+
         for i, train_ex in enumerate(train_iter):
             if stalled > args.patience:
+                learning_rate *= args.lr_decrease_ratio
+                for param_group in optimizer.param_groups:
+                    param_group['lr'] = learning_rate
+                remaining_decrease -= 1
+                stalled = 0
+                logging.info(f"Decreasing learning rate to {learning_rate}.")
+            if remaining_decrease <= 0:
                 break
             step += 1
 
             (action_scores, expected_counts,
-                logprob, next_symbol_score) = neural_model(
+                logprob, next_symbol_score) = model(
                 train_ex.ar, train_ex.en)
 
-            en_mask = (train_ex.en != neural_model.en_pad).float()
-            ar_mask = (train_ex.ar != neural_model.ar_pad).float()
+            en_mask = (train_ex.en != model.en_pad).float()
+            ar_mask = (train_ex.ar != model.ar_pad).float()
             table_mask = (ar_mask.unsqueeze(2) * en_mask.unsqueeze(1)).float()
 
             loss = torch.tensor(0.).to(device)
@@ -136,11 +170,11 @@ def main():
             loss.backward()
 
             if step % args.delay_update == args.delay_update - 1:
-                stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
-                print(f"[{stamp}] step: {step}, train loss = {loss:.3g} "
+                logging.info(f"step: {step}, train loss = {loss:.3g} "
                       f"(NLL {nll_loss:.3g}, "
                       f"EM: {kl_loss:.3g}, "
                       f"sampled EM: {sampled_em_loss:.3g})")
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 optimizer.step()
                 optimizer.zero_grad()
 
@@ -150,7 +184,7 @@ def main():
                 tb_writer.add_scalar('train/em_kl_div', kl_loss, step)
                 tb_writer.add_scalar(
                     'train/sampled_em_nll', sampled_em_loss, step)
-                neural_model.eval()
+                model.eval()
 
                 sources = []
                 ground_truth = []
@@ -158,7 +192,8 @@ def main():
 
                 for j, val_ex in enumerate(val_iter):
                     with torch.no_grad():
-                        decoded_val = neural_model.decode(val_ex.ar)
+                        #decoded_val = model.beam_search(val_ex.ar, beam_size=2)
+                        decoded_val = model.decode(val_ex.ar)
 
                         for ar, en, hyp in zip(val_ex.ar, val_ex.en, decoded_val):
                             src_string = decode_ids(
@@ -174,10 +209,10 @@ def main():
 
                         if j == 0:
                             for src, hyp, tgt in zip(sources[:10], hypotheses, ground_truth):
-                                print()
-                                print(f"'{src}' -> '{hyp}' ({tgt})")
+                                logging.info("")
+                                logging.info(f"'{src}' -> '{hyp}' ({tgt})")
 
-                print()
+                logging.info("")
 
                 wer = 1 - sum(
                     float(gt == hyp) for gt, hyp
@@ -195,26 +230,34 @@ def main():
                     best_cer_step = step
                     stalled = 0
 
-                print(
+                logging.info(
                     f"WER: {wer:.3g}   (best {best_wer:.3g}, step {best_wer_step})")
-                print(
+                logging.info(
                     f"CER: {cer:.3g}   (best {best_cer:.3g}, step {best_cer_step})")
                 if stalled > 0:
-                    print(f"Stalled {stalled} times.")
-                print()
+                    logging.info(f"Stalled {stalled} times.")
+                else:
+                    torch.save(model, model_path)
+
+                logging.info("")
 
                 tb_writer.add_scalar('val/cer', cer, step)
                 tb_writer.add_scalar('val/wer', wer, step)
                 tb_writer.flush()
-                neural_model.train()
+                model.train()
 
-    print("TRAINING FINISHED, evaluating on test data")
-    print()
-    neural_model.eval()
+    logging.info("TRAINING FINISHED, evaluating on test data")
+    logging.info("")
+    model = torch.load(model_path)
+    model.eval()
+
+    sources = []
+    ground_truth = []
+    hypotheses = []
 
     for j, test_ex in enumerate(test_iter):
         with torch.no_grad():
-            decoded_val = neural_model.decode(test_ex.ar)
+            decoded_val = model.beam_search(test_ex.ar, beam_size=3)
 
             for ar, en, hyp in zip(test_ex.ar, test_ex.en, decoded_val):
                 src_string = decode_ids(ar, ar_text_field, args.src_tokenized)
@@ -227,19 +270,19 @@ def main():
 
             if j == 0:
                 for src, hyp, tgt in zip(sources[:10], hypotheses, ground_truth):
-                    print()
-                    print(f"'{src}' -> '{hyp}' ({tgt})")
+                    logging.info("")
+                    logging.info(f"'{src}' -> '{hyp}' ({tgt})")
 
-    print()
+    logging.info("")
 
     wer = 1 - sum(
         float(gt == hyp) for gt, hyp
         in zip(ground_truth, hypotheses)) / len(ground_truth)
     cer = char_error_rate(hypotheses, ground_truth, args.tgt_tokenized)
 
-    print(f"WER: {wer:.3g}")
-    print(f"CER: {cer:.3g}")
-    print()
+    logging.info(f"WER: {wer:.3g}")
+    logging.info(f"CER: {cer:.3g}")
+    logging.info("")
 
 
 if __name__ == "__main__":
