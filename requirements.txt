@@ -4,3 +4,6 @@ transformers
 editdistance
 termcolor
 tensorboardX
+infomap
+bcubed
+progress
