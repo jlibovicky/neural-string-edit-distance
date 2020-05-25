@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
-import datetime
+import logging
 import os
 
 import numpy as np
@@ -19,7 +19,7 @@ from experiment import experiment_logging, get_timestamp, save_vocab
 def cat_examples(dataset, text_field):
     dataset.fields["text"] = text_field
     for example in dataset.examples:
-        example.text = example.src + ["<s>", "</s>"] + example.tgt
+        example.text = example.src + example.tgt
 
 
 def main():
@@ -27,12 +27,12 @@ def main():
     parser.add_argument("data_prefix", type=str)
     parser.add_argument("--hidden-size", default=256, type=int)
     parser.add_argument("--attention-heads", default=8, type=int)
-    parser.add_argument("--layers", default=2, type=int)
+    parser.add_argument("--layers", default=4, type=int)
     parser.add_argument("--batch-size", default=512, type=int)
     parser.add_argument("--delay-update", default=1, type=int,
                         help="Update model every N steps.")
-    parser.add_argument("--epochs", default=10, type=int)
-    parser.add_argument("--patience", default=20, type=int,
+    parser.add_argument("--epochs", default=1000, type=int)
+    parser.add_argument("--patience", default=10, type=int,
                         help="Number of validations witout improvement before finishing.")
     parser.add_argument("--learning-rate", default=1e-4, type=float)
     args = parser.parse_args()
@@ -92,9 +92,14 @@ def main():
     optimizer = optim.Adam(model.parameters())
 
     step = 0
-    best_accuracy = 0.0
+    best_f_score = 0.0
+    stalled = 0
     for _ in range(args.epochs):
+        if stalled > args.patience:
+            break
         for i, train_batch in enumerate(train_iter):
+            if stalled > args.patience:
+                break
             step += 1
 
             loss, logits = model(
@@ -102,8 +107,7 @@ def main():
                 labels=train_batch.label.to(device))
             loss.backward()
 
-            stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
-            print(f"[{stamp}] step: {step}, train loss = {loss:.3g}")
+            logging.info(f"step: {step}, train loss = {loss:.3g}")
             optimizer.step()
             optimizer.zero_grad()
 
@@ -120,24 +124,72 @@ def main():
                             else:
                                 false_scores.append(prob.cpu().numpy())
 
-                        if j > 2:
+                        if j > 10:
                             break
 
                     pos_mean = np.mean(true_scores)
                     neg_mean = np.mean(false_scores)
                     boundary = (pos_mean + neg_mean) / 2
-                    accuracy = np.mean(np.concatenate((
-                        np.array(true_scores) > boundary, np.array(false_scores) < boundary)))
 
-                    if accuracy > best_accuracy:
+                    true_positive = np.sum(true_scores > boundary)
+                    false_positive = np.sum(false_scores > boundary)
+                    precision = true_positive / (true_positive + false_positive)
+                    recall = true_positive / len(true_scores)
+                    f_score = 2 * precision * recall / (precision + recall)
+
+                    logging.info("")
+                    logging.info(f"neural true  scores: {pos_mean:.3f} +/- {np.std(true_scores):.3f}")
+                    logging.info(f"neural false scores: {neg_mean:.3f} +/- {np.std(false_scores):.3f}")
+                    logging.info(f"Precision: {precision:.3f}")
+                    logging.info(f"Recall: {recall:.3f}")
+                    logging.info(f"F1-score: {f_score:.3f}")
+
+                    if f_score > best_f_score:
                         torch.save(model, model_path)
+                        best_f_score = f_score
+                        stalled = 0
+                    else:
+                        stalled += 1
 
-                    print()
-                    print(f"neural true  scores: {pos_mean:.3f} +/- {np.std(true_scores):.3f}")
-                    print(f"neural false scores: {neg_mean:.3f} +/- {np.std(false_scores):.3f}")
-                    print(f"accuracy: {accuracy:.3f}")
-                    print()
+                    if stalled > 0:
+                        logging.info(f"Stalled {stalled} times.")
+
+                    logging.info("")
                 model.train()
+
+    logging.info("")
+    logging.info("TRANING FINISHED, TESTING")
+    logging.info("")
+
+    model = torch.load(model_path)
+    model.eval()
+    with torch.no_grad():
+        false_scores = []
+        true_scores = []
+        for j, test_ex in enumerate(test_iter):
+            score = F.softmax(model(test_ex.text)[0], dim=1)[:, 1]
+            for prob, label in zip(score, test_ex.label):
+                if label == 1:
+                    true_scores.append(prob.cpu().numpy())
+                else:
+                    false_scores.append(prob.cpu().numpy())
+
+        pos_mean = np.mean(true_scores)
+        neg_mean = np.mean(false_scores)
+        boundary = (pos_mean + neg_mean) / 2
+
+        true_positive = np.sum(true_scores > boundary)
+        false_positive = np.sum(false_scores > boundary)
+        precision = true_positive / (true_positive + false_positive)
+        recall = true_positive / len(true_scores)
+        f_score = 2 * precision * recall / (precision + recall)
+
+        logging.info("")
+        logging.info(f"neural true  scores: {pos_mean:.3f} +/- {np.std(true_scores):.3f}")
+        logging.info(f"neural false scores: {neg_mean:.3f} +/- {np.std(false_scores):.3f}")
+        logging.info(f"Precision: {precision:.3f}")
+        logging.info(f"Recall: {recall:.3f}")
+        logging.info(f"F1-score: {f_score:.3f}")
 
 
 if __name__ == "__main__":
