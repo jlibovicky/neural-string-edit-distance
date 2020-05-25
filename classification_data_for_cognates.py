@@ -13,6 +13,7 @@ def main():
     parser = argparse.ArgumentParser(__doc__)
     parser.add_argument("dataset_file", type=argparse.FileType("r"))
     parser.add_argument("--seed", type=int, default=85604)
+    parser.add_argument("--negative-oversample", type=int, default=10)
     args = parser.parse_args()
 
     random.seed(args.seed)
@@ -20,8 +21,6 @@ def main():
     per_class_listing = defaultdict(list)
     reader = csv.DictReader(args.dataset_file, dialect='excel-tab')
     for item in reader:
-        # per_class_listing[item["COGNATE_CLASS"]].append(
-        #     f"{item['DOCULECT']} {item['TOKENS']}")
         per_class_listing[item["COGNATE_CLASS"]].append(item['TOKENS'])
 
     args.dataset_file.close()
@@ -38,7 +37,7 @@ def main():
           file=sys.stderr)
 
     classes = list(per_class_listing.keys())
-    for _ in range(n_positive_examples):
+    for _ in range(args.negative_oversample * n_positive_examples):
         cls_1 = random.choice(classes)
         cls_2 = cls_1
         while cls_1 == cls_2:
