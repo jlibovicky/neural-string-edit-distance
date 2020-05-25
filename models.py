@@ -121,10 +121,11 @@ class NeuralEditDistBase(EditDistBase):
             self.en_encoder = self._encoder_for_vocab(en_vocab, directed=directed)
 
         self.projection = nn.Sequential(
-            nn.Dropout(0.3),
+            nn.Dropout(0.1),
             nn.Linear(2 * self.hidden_dim, self.hidden_dim),
-            nn.Dropout(0.3),
-            nn.ReLU())
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.LayerNorm(self.hidden_dim))
 
         self.encoder_decoder_attention = encoder_decoder_attention
 
