@@ -85,6 +85,7 @@ class Attention(nn.Module):
 class RNNDecoder(nn.Module):
     def __init__(self, vocab, hidden_size, embedding_size,
                  num_layers=2, attention_heads=4, dropout=0.0,
+                 use_attention=True,
                  output_proj=False):
         super(RNNDecoder, self).__init__()
 
@@ -92,6 +93,7 @@ class RNNDecoder(nn.Module):
         self.hidden_size = hidden_size
         self.embedding_size = embedding_size
         self.num_layers = num_layers
+        self.use_attention = use_attention
 
         self.dropout = nn.Dropout(dropout)
         self.embeddings = nn.Embedding(len(vocab), embedding_size)
@@ -105,10 +107,11 @@ class RNNDecoder(nn.Module):
         self.ctx_norms = nn.ModuleList([
             nn.LayerNorm(hidden_size) for _ in range(num_layers)])
 
-        if attention_heads == 1:
+        self.attn = [None for _ in range(num_layers)]
+        if use_attention and attention_heads == 1:
             self.attn = nn.ModuleList([
                 Attention(hidden_size) for _ in range(num_layers)])
-        else:
+        elif use_attention:
             self.attn = nn.ModuleList([
                 BertSelfAttention(ATT_CONFIG(hidden_size, attention_heads, False, 0.1))
                 for _ in range(num_layers)])
@@ -122,8 +125,7 @@ class RNNDecoder(nn.Module):
             self.output_proj = nn.Sequential(
                 nn.Linear(hidden_size, hidden_size),
                 nn.ReLU(),
-                nn.Dropout(dropout),
-                nn.Linear(hidden_size, embedding_size))
+                nn.Dropout(dropout))
 
     def forward(self, input_ids, attention_mask, encoder_hidden_states=None, encoder_attention_mask=None):
         input_lengths = attention_mask.sum(1)
