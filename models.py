@@ -523,11 +523,11 @@ class EditDistNeuralModelProgressive(NeuralEditDistBase):
             ar_len, en_len, ar_sent, en_sent, alpha, action_scores)
 
         insertion_log_dist = (
-            F.log_softmax(insertion_logits, dim=3))
-            # + alpha[:, :, 1:].unsqueeze(3))
+            F.log_softmax(insertion_logits, dim=3)
+            + alpha[:, :, 1:].unsqueeze(3))
         subs_log_dist = (
-            F.log_softmax(subs_logits, dim=3))
-            # + alpha[:, 1:, 1:].unsqueeze(3))
+            F.log_softmax(subs_logits, dim=3)
+            + alpha[:, 1:, 1:].unsqueeze(3))
 
         next_symbol_logprobs_sum = torch.cat(
             (insertion_log_dist, subs_log_dist), dim=1).logsumexp(1)
@@ -557,22 +557,18 @@ class EditDistNeuralModelProgressive(NeuralEditDistBase):
             Logits for the next symbols.
         """
 
-        # TODO apply logsoftmax and weight by alpha
-
-        # From what we have, do a prediction what is the next symbol
-        insertion_scores = (
             F.log_softmax(
                 self.insertion_proj(feature_table[b_range, :, v - 1:v]),
                 dim=-1)
-            + log_ar_mask.unsqueeze(2).unsqueeze(3))
-            # + alpha[:, :, v - 1:v].unsqueeze(3))
+            + log_ar_mask.unsqueeze(2).unsqueeze(3)
+            + alpha[:, :, v - 1:v].unsqueeze(3))
 
         subs_scores = (
             F.log_softmax(
                 self.substitution_proj(feature_table[b_range, 1:, v - 1:v]),
                 dim=-1)
-            + log_ar_mask[:, 1:].unsqueeze(2).unsqueeze(3))
-            # + alpha[:, 1:, v - 1:v].unsqueeze(3))
+            + log_ar_mask[:, 1:].unsqueeze(2).unsqueeze(3)
+            + alpha[:, 1:, v - 1:v].unsqueeze(3))
 
         next_symb_scores = torch.cat(
             (insertion_scores, subs_scores), dim=1).logsumexp(1)
@@ -611,14 +607,14 @@ class EditDistNeuralModelProgressive(NeuralEditDistBase):
             subsitute_id = self._substitute_id(ar_char, en_sent[:, v])
 
             to_sum = [
-                action_scores[b_range, t, v - 1, insertion_id] +
+                action_scores[b_range, t, v, insertion_id] +
                 alpha[:, t, v - 1]]
             if t >= 1:
                 to_sum.append(
-                    action_scores[b_range, t, v - 1, deletion_id] +
+                    action_scores[b_range, t, v, deletion_id] +
                     alpha[:, t - 1, v])
                 to_sum.append(
-                    action_scores[b_range, t, v - 1, subsitute_id] +
+                    action_scores[b_range, t, v, subsitute_id] +
                     alpha[:, t - 1, v - 1])
 
             if len(to_sum) == 1:
