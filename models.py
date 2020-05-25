@@ -145,9 +145,9 @@ class NeuralEditDistBase(EditDistBase):
             return self._rnn_for_vocab(vocab, directed)
         elif self.model_type == "bert":
             return BertModel.from_pretrained("bert-base-cased")
-        elif self.mode_type == "embeddings":
+        elif self.model_type == "embeddings":
             return self._cnn_for_vocab(vocab, directed, hidden=False)
-        elif self.mode_type == "cnn":
+        elif self.model_type == "cnn":
             return self._cnn_for_vocab(vocab, directed, hidden=True)
         raise ValueError(f"Uknown model type {self.model_type}.")
 
@@ -176,7 +176,7 @@ class NeuralEditDistBase(EditDistBase):
                 self.hidden_dim, self.hidden_layers, self.attention_heads,
                 output_proj=False, dropout=0.1)
 
-    def _cnn_for_vocab(self, vocab, directed=False, hidden=True):
+    def _cnn_for_vocab(self, vocab, directed=False, hidden=True, dropout=0.1):
         layers = self.hidden_layers if hidden else 0
 
         if not directed:
@@ -184,14 +184,14 @@ class NeuralEditDistBase(EditDistBase):
                 vocab, self.hidden_dim,
                 self.hidden_dim,
                 window=self.window,
-                layers=layers, dropout=0.1)
+                layers=layers, dropout=dropout)
         else:
             return CNNDecoder(
                 vocab, self.hidden_dim,
                 self.hidden_dim, layers=layers,
                 window=self.window,
                 attention_heads=self.attention_heads,
-                output_proj=False, dropout=0.1)
+                output_proj=False, dropout=dropout)
 
     def _encode_ar(self, inputs, mask):
         return self.ar_encoder(inputs, attention_mask=mask)[0]
@@ -502,6 +502,7 @@ class EditDistNeuralModelConcurrent(NeuralEditDistBase):
 class EditDistNeuralModelProgressive(NeuralEditDistBase):
     def __init__(self, ar_vocab, en_vocab, device, directed=True,
                  hidden_dim=32, hidden_layers=2, attention_heads=4,
+                 window=3,
                  encoder_decoder_attention=True, model_type="transformer",
                  start_symbol="<s>", end_symbol="</s>", pad_symbol="<pad>"):
         super(EditDistNeuralModelProgressive, self).__init__(
@@ -509,7 +510,7 @@ class EditDistNeuralModelProgressive(NeuralEditDistBase):
             model_type=model_type,
             encoder_decoder_attention=encoder_decoder_attention,
             hidden_dim=hidden_dim, hidden_layers=hidden_layers,
-            attention_heads=attention_heads,
+            attention_heads=attention_heads, window=window,
             start_symbol=start_symbol, end_symbol=end_symbol,
             pad_symbol=pad_symbol)
 
