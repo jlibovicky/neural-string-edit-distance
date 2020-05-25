@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 
 import argparse
-import copy
 import datetime
-from itertools import chain
 import logging
+import os
 
 from tensorboardX import SummaryWriter
 import torch
@@ -12,144 +11,166 @@ from torch import nn, optim
 from torch.functional import F
 from transformers import BertConfig, BertModel
 
-from experiment import experiment_logging, get_timestamp
+from experiment import experiment_logging, get_timestamp, save_vocab
 from rnn import RNNEncoder, RNNDecoder
 from transliteration_utils import (
     load_transliteration_data, decode_ids, char_error_rate)
 
 
-def keep_params(model_part):
-    state_dict = model_part.state_dict()
-    for key, value in state_dict.items():
-        state_dict[key] = value.cpu()
-    return copy.deepcopy(state_dict)
+class Seq2SeqModel(nn.Module):
+
+    def __init__(
+            self, encoder, decoder, src_pad_token_id, tgt_bos_token_id,
+            tgt_eos_token_id, tgt_pad_token_id, device):
+        super(Seq2SeqModel, self).__init__()
+        self.encoder = encoder
+        self.decoder = decoder
+
+        if isinstance(decoder, RNNDecoder):
+            self.transposed_embeddings = decoder.embeddings.weight.t()
+        else:
+            self.transposed_embeddings = decoder.embeddings.word_embeddings.weight.t()
+
+        self.tgt_bos_token_id = tgt_bos_token_id
+        self.tgt_eos_token_id = tgt_eos_token_id
+        self.tgt_pad_token_id = tgt_pad_token_id
+        self.src_pad_token_id = src_pad_token_id
+
+        self.device = device
 
 
-def transposed_embeddings(decoder):
-    if isinstance(decoder, RNNDecoder):
-        return decoder.embeddings.weight.t()
-    return decoder.embeddings.word_embeddings.weight.t()
-
-
-def greedy_decode(
-        encoder, decoder, src_batch, bos_token_id, eos_token_id,
-        pad_token_id, device, max_len=100):
-    input_mask = src_batch != pad_token_id
-    encoded, _ = encoder(src_batch, attention_mask=input_mask)
-    batch_size = encoded.size(0)
-
-    finished = [torch.tensor([False for _ in range(batch_size)]).to(device)]
-    decoded = [torch.tensor([
-        bos_token_id for _ in range(batch_size)]).to(device)]
-
-    for _ in range(max_len):
-        decoder_input = torch.stack(decoded, dim=1)
-        decoder_states, _ = decoder(
-            decoder_input,
-            attention_mask=~torch.stack(finished, dim=1),
-            encoder_hidden_states=encoded,
-            encoder_attention_mask=input_mask)
+    def forward(self, src_batch, tgt_batch):
+        encoder_mask = src_batch != self.src_pad_token_id
+        encoder_states = self.encoder(
+            src_batch,
+            attention_mask=encoder_mask)[0]
+        decoder_states = self.decoder(
+            tgt_batch[:, :-1],
+            attention_mask=tgt_batch[:, :-1] != self.tgt_pad_token_id,
+            encoder_hidden_states=encoder_states,
+            encoder_attention_mask=encoder_mask)[0]
         logits = torch.matmul(
             decoder_states,
-            transposed_embeddings(decoder))
-        next_symbol = logits[:, -1].argmax(dim=1)
-        decoded.append(next_symbol)
-
-        finished_now = next_symbol == eos_token_id + finished[-1]
-        finished.append(finished_now)
-
-        if all(finished_now):
-            break
-
-    return (torch.stack(decoded, dim=1),
-            torch.stack(finished, dim=1).logical_not())
+            self.transposed_embeddings)
+        return logits
 
 
-@torch.no_grad()
-def beam_search(
-        encoder, decoder, src_batch, bos_token_id, eos_token_id,
-        pad_token_id, device, beam_size=10, max_len=100):
-    input_mask = src_batch != pad_token_id
-    encoded, _ = encoder(src_batch, attention_mask=input_mask)
-    batch_size = encoded.size(0)
-    b_range = torch.arange(batch_size)
+    @torch.no_grad()
+    def greedy_decode(self, src_batch, max_len=100):
+        input_mask = src_batch != self.src_pad_token_id
+        encoded, _ = self.encoder(src_batch, attention_mask=input_mask)
+        batch_size = encoded.size(0)
 
-    cur_len = 1
-    current_beam = 1
+        finished = [torch.tensor([False for _ in range(batch_size)]).to(self.device)]
+        decoded = [torch.tensor([
+            self.tgt_bos_token_id for _ in range(batch_size)]).to(self.device)]
 
-    decoded = torch.full(
-        (batch_size, 1, 1), bos_token_id, dtype=torch.long).to(device)
-    finished = torch.full(
-        (batch_size, 1, 1), False, dtype=torch.bool).to(device)
-    scores = torch.zeros((batch_size, 1)).to(device)
+        for _ in range(max_len):
+            decoder_input = torch.stack(decoded, dim=1)
+            decoder_states, _ = self.decoder(
+                decoder_input,
+                attention_mask=~torch.stack(finished, dim=1),
+                encoder_hidden_states=encoded,
+                encoder_attention_mask=input_mask)
+            logits = torch.matmul(
+                decoder_states,
+                self.transposed_embeddings)
+            next_symbol = logits[:, -1].argmax(dim=1)
+            decoded.append(next_symbol)
 
-    while cur_len < max_len:
-        flat_decoded = decoded.reshape(-1, cur_len)
-        flat_finished = finished.reshape(-1, cur_len)
+            finished_now = next_symbol == self.tgt_eos_token_id + finished[-1]
+            finished.append(finished_now)
 
-        outputs = decoder(
-            input_ids=flat_decoded,
-            attention_mask=~flat_finished,
-            encoder_hidden_states=encoded,
-            encoder_attention_mask=input_mask)
-        next_token_logprobs = F.log_softmax(torch.matmul(
-            outputs[0][:, -1, :],
-            transposed_embeddings(decoder)), dim=1)
-        vocab_size = next_token_logprobs.size(1)
-        past = outputs[1]
+            if all(finished_now):
+                break
 
-        # get scores of all expanded hypotheses
-        candidate_scores = (
-            scores.unsqueeze(2) +
-            next_token_logprobs.reshape(batch_size, current_beam, -1))# / cur_len
+        return (torch.stack(decoded, dim=1),
+                torch.stack(finished, dim=1).logical_not())
 
-        # reshape for beam members and get top k
-        best_scores, best_indices = candidate_scores.reshape(
-            batch_size, -1).topk(beam_size, dim=-1)
-        next_symbol_ids = best_indices % vocab_size
-        hypothesis_ids = best_indices // vocab_size
+    @torch.no_grad()
+    def beam_search(self, src_batch, beam_size=10, max_len=100):
+        input_mask = src_batch != self.src_pad_token_id
+        encoded, _ = self.encoder(src_batch, attention_mask=input_mask)
+        batch_size = encoded.size(0)
+        b_range = torch.arange(batch_size)
 
-        # numbering elements in the extended batch, i.e. beam size copies of
-        # each batch element
-        beam_offset = torch.arange(
-            0, batch_size * current_beam, step=current_beam,
-            dtype=torch.long, device=device)
-        global_best_indices = (
-            beam_offset.unsqueeze(1) + hypothesis_ids).reshape(-1)
+        cur_len = 1
+        current_beam = 1
 
-        # now select appropriate histories
-        decoded = torch.cat((
-            flat_decoded.index_select(
-                0, global_best_indices).reshape(batch_size, beam_size, -1),
-            next_symbol_ids.unsqueeze(-1)), dim=2)
-        reordered_finished = flat_finished.index_select(
-                0, global_best_indices).reshape(batch_size, beam_size, -1)
-        finished_now = (
-            next_symbol_ids == eos_token_id + reordered_finished[:, :, -1])
-        finished = torch.cat((
-            reordered_finished,
-            finished_now.unsqueeze(-1)), dim=2)
+        decoded = torch.full(
+            (batch_size, 1, 1), self.tgt_bos_token_id, dtype=torch.long).to(self.device)
+        finished = torch.full(
+            (batch_size, 1, 1), False, dtype=torch.bool).to(self.device)
+        scores = torch.zeros((batch_size, 1)).to(self.device)
 
-        # re-order scores
-        scores = (
-            scores.reshape(
-                -1).index_select(0, global_best_indices).reshape(
-                    batch_size, beam_size) + best_scores)
+        while cur_len < max_len:
+            flat_decoded = decoded.reshape(-1, cur_len)
+            flat_finished = finished.reshape(-1, cur_len)
 
-        # tile encoder after first step
-        if cur_len == 1:
-            encoded = encoded.unsqueeze(1).repeat(
-                1, beam_size, 1, 1).reshape(
-                    batch_size * beam_size, encoded.size(1), encoded.size(2))
-            input_mask = input_mask.unsqueeze(1).repeat(1, beam_size, 1).reshape(
-                batch_size * beam_size, -1)
+            outputs = self.decoder(
+                input_ids=flat_decoded,
+                attention_mask=~flat_finished,
+                encoder_hidden_states=encoded,
+                encoder_attention_mask=input_mask)
+            next_token_logprobs = F.log_softmax(torch.matmul(
+                outputs[0][:, -1, :],
+                self.transposed_embeddings), dim=1)
+            vocab_size = next_token_logprobs.size(1)
+            past = outputs[1]
 
-        # in the first iteration, beam size is 1, in the later ones,
-        # it is the real beam size
-        current_beam = beam_size
-        cur_len += 1
+            # get scores of all expanded hypotheses
+            candidate_scores = (
+                scores.unsqueeze(2) +
+                next_token_logprobs.reshape(batch_size, current_beam, -1))# / cur_len
 
-    return (decoded[:, 0], finished[:, 0].logical_not())
+            # reshape for beam members and get top k
+            best_scores, best_indices = candidate_scores.reshape(
+                batch_size, -1).topk(beam_size, dim=-1)
+            next_symbol_ids = best_indices % vocab_size
+            hypothesis_ids = best_indices // vocab_size
+
+            # numbering elements in the extended batch, i.e. beam size copies of
+            # each batch element
+            beam_offset = torch.arange(
+                0, batch_size * current_beam, step=current_beam,
+                dtype=torch.long, device=self.device)
+            global_best_indices = (
+                beam_offset.unsqueeze(1) + hypothesis_ids).reshape(-1)
+
+            # now select appropriate histories
+            decoded = torch.cat((
+                flat_decoded.index_select(
+                    0, global_best_indices).reshape(batch_size, beam_size, -1),
+                next_symbol_ids.unsqueeze(-1)), dim=2)
+            reordered_finished = flat_finished.index_select(
+                    0, global_best_indices).reshape(batch_size, beam_size, -1)
+            finished_now = (
+                next_symbol_ids == self.tgt_eos_token_id + reordered_finished[:, :, -1])
+            finished = torch.cat((
+                reordered_finished,
+                finished_now.unsqueeze(-1)), dim=2)
+
+            # re-order scores
+            scores = best_scores
+            #scores = (
+            #    scores.reshape(
+            #        -1).index_select(0, global_best_indices).reshape(
+            #            batch_size, beam_size) + best_scores)
+
+            # tile encoder after first step
+            if cur_len == 1:
+                encoded = encoded.unsqueeze(1).repeat(
+                    1, beam_size, 1, 1).reshape(
+                        batch_size * beam_size, encoded.size(1), encoded.size(2))
+                input_mask = input_mask.unsqueeze(1).repeat(1, beam_size, 1).reshape(
+                    batch_size * beam_size, -1)
+
+            # in the first iteration, beam size is 1, in the later ones,
+            # it is the real beam size
+            current_beam = beam_size
+            cur_len += 1
+
+        return (decoded[:, 0], finished[:, 0].logical_not())
 
 
 def main():
@@ -176,8 +197,19 @@ def main():
         "--learning-rate", default=1e-4, type=float)
     args = parser.parse_args()
 
+    experiment_params = (
+        args.data_prefix.replace("/", "_") +
+        f"_{args.model_type}" +
+        f"_hidden{args.hidden_size}" +
+        f"_attheads{args.attention_heads}" +
+        f"_layers{args.layers}" +
+        f"_batch{args.batch_size}" +
+        f"_lr{args.learning_rate}" +
+        f"_patence{args.patience}")
     experiment_dir = experiment_logging(
-        "s2s_transliteration_" + get_timestamp(), args)
+        f"s2s_{experiment_params}_{get_timestamp()}", args)
+    model_path = os.path.join(experiment_dir, "model.pt")
+    tb_writer = SummaryWriter(experiment_dir)
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     ar_text_field, en_text_field, train_iter, val_iter, test_iter = \
@@ -185,6 +217,11 @@ def main():
             args.data_prefix, args.batch_size, device,
             src_tokenized=args.src_tokenized,
             tgt_tokenized=args.tgt_tokenized)
+
+    save_vocab(
+        ar_text_field.vocab.itos, os.path.join(experiment_dir, "src_vocab"))
+    save_vocab(
+        en_text_field.vocab.itos, os.path.join(experiment_dir, "tgt_vocab"))
 
     if args.model_type == "transformer":
         transformer_config = BertConfig(
@@ -213,35 +250,24 @@ def main():
     else:
         raise RuntimeError("Unknown model type.")
 
+    model = Seq2SeqModel(
+        encoder, decoder,
+        src_pad_token_id=ar_text_field.vocab.stoi[ar_text_field.pad_token],
+        tgt_bos_token_id=en_text_field.vocab.stoi[en_text_field.init_token],
+        tgt_eos_token_id=en_text_field.vocab.stoi[en_text_field.eos_token],
+        tgt_pad_token_id=en_text_field.vocab.stoi[en_text_field.pad_token],
+        device=device)
+
     nll = nn.CrossEntropyLoss().to(device)
     optimizer = optim.Adam(
-            chain(encoder.parameters(), decoder.parameters()),
-            lr=args.learning_rate)
-
-    en_bos_token_id = en_text_field.vocab.stoi[en_text_field.init_token]
-    en_eos_token_id = en_text_field.vocab.stoi[en_text_field.eos_token]
-    en_pad_token_id = en_text_field.vocab.stoi[en_text_field.pad_token]
-    ar_pad_token_id = ar_text_field.vocab.stoi[ar_text_field.pad_token]
+            model.parameters(), lr=args.learning_rate)
 
     step = 0
-    best_wer = 1.0
+    best_wer = 1e9
     best_wer_step = 0
     best_cer = 1e9
     best_cer_step = 0
     stalled = 0
-
-    best_params = None
-
-
-    stamp = datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S-%f")
-    experiment_params = (
-        args.data_prefix.replace("/", "_") +
-        f"_hidden{args.hidden_size}" +
-        f"_attheads{args.attention_heads}" +
-        f"_layers{args.layers}" +
-        f"_batch{args.batch_size}" +
-        f"_patence{args.patience}")
-    tb_writer = SummaryWriter(f"runs/transformer_{experiment_params}_{stamp}")
 
     for _ in range(args.epochs):
         if stalled > args.patience:
@@ -251,18 +277,7 @@ def main():
                 break
             step += 1
 
-            encoder_mask = train_batch.ar != ar_pad_token_id
-            encoder_states = encoder(
-                train_batch.ar,
-                attention_mask=encoder_mask)[0]
-            decoder_states = decoder(
-                train_batch.en[:, :-1],
-                attention_mask=train_batch.en[:, :-1] != ar_pad_token_id,
-                encoder_hidden_states=encoder_states,
-                encoder_attention_mask=encoder_mask)[0]
-            logits = torch.matmul(
-                decoder_states,
-                transposed_embeddings(decoder))
+            logits = model(train_batch.ar, train_batch.en)
 
             loss = nll(
                 logits.reshape([-1, len(en_text_field.vocab)]),
@@ -271,15 +286,13 @@ def main():
 
             if step % 50 == 49:
                 logging.info(f"step: {step}, train loss = {loss:.3g}")
-            torch.nn.utils.clip_grad_norm_(
-                chain(encoder.parameters(), decoder.parameters()), 1.0)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
             optimizer.zero_grad()
 
             if step % 500 == 499:
                 tb_writer.add_scalar('train/nll', loss, step)
-                encoder.eval()
-                decoder.eval()
+                model.eval()
 
                 ground_truth = []
                 all_hypotheses = []
@@ -297,11 +310,8 @@ def main():
                                 tokenized=args.tgt_tokenized)
                             for val_ex in val_batch.en]
 
-                        decoded_val = beam_search(
-                            encoder, decoder, val_batch.ar,
-                            en_bos_token_id, en_eos_token_id,
-                            en_pad_token_id,
-                            device,
+                        decoded_val = model.greedy_decode(
+                            val_batch.ar,
                             max_len=2 * val_batch.ar.size(1))
 
                         hypotheses = [
@@ -342,66 +352,52 @@ def main():
                 if stalled > 0:
                     logging.info(f"Stalled {stalled} times.")
                 else:
-                    best_params = keep_params(encoder), keep_params(decoder)
+                    torch.save(model, model_path)
                 logging.info("")
 
                 tb_writer.add_scalar('val/cer', cer, step)
                 tb_writer.add_scalar('val/wer', wer, step)
                 tb_writer.flush()
-                encoder.train()
-                decoder.train()
+                model.train()
 
     logging.info("TRAINING FINISHED, evaluating on test data")
     logging.info("")
 
-    encoder.eval()
-    decoder.eval()
+    model = torch.load(model_path)
+    model.eval()
 
-    for key, value in best_params[0].items():
-        best_params[0][key] = value.cuda()
-    encoder.load_state_dict(best_params[0])
+    for j, test_batch in enumerate(test_iter):
+        with torch.no_grad():
+            src_string = [
+                decode_ids(test_ex, ar_text_field,
+                           tokenized=args.src_tokenized)
+                for test_ex in test_batch.ar]
+            tgt_string = [
+                decode_ids(test_ex, en_text_field,
+                           tokenized=args.tgt_tokenized)
+                for test_ex in test_batch.en]
 
-    for key, value in best_params[1].items():
-        best_params[1][key] = value.cuda()
-    decoder.load_state_dict(best_params[1])
+            decoded_val = model.beam_search(
+                test_batch.ar,
+                max_len=2 * test_batch.ar.size(1))
 
-    for beam_size in range(1, 30):
-        logging.info(f"Beam size {beam_size}")
-        for j, test_batch in enumerate(test_iter):
-            with torch.no_grad():
-                src_string = [
-                    decode_ids(test_ex, ar_text_field,
-                               tokenized=args.src_tokenized)
-                    for test_ex in test_batch.ar]
-                tgt_string = [
-                    decode_ids(test_ex, en_text_field,
-                               tokenized=args.tgt_tokenized)
-                    for test_ex in test_batch.en]
+            hypotheses = [
+                decode_ids(out, en_text_field, tokenized=args.tgt_tokenized)
+                for out in decoded_val[0]]
 
-                decoded_val = beam_search(
-                    encoder, decoder, test_batch.ar,
-                    en_bos_token_id, en_eos_token_id,
-                    en_pad_token_id,
-                    device,
-                    max_len=2 * test_batch.ar.size(1))
+            ground_truth.extend(tgt_string)
+            all_hypotheses.extend(hypotheses)
 
-                hypotheses = [
-                    decode_ids(out, en_text_field, tokenized=args.tgt_tokenized)
-                    for out in decoded_val[0]]
+    logging.info("")
+    wer = 1 - sum(
+        float(gt == hyp) for gt, hyp
+        in zip(ground_truth, all_hypotheses)) / len(ground_truth)
+    logging.info(f"WER: {wer:.3g}")
 
-                ground_truth.extend(tgt_string)
-                all_hypotheses.extend(hypotheses)
-
-        logging.info("")
-        wer = 1 - sum(
-            float(gt == hyp) for gt, hyp
-            in zip(ground_truth, all_hypotheses)) / len(ground_truth)
-        logging.info(f"WER: {wer:.3g}")
-
-        cer = char_error_rate(
-            all_hypotheses, ground_truth, tokenized=args.tgt_tokenized)
-        logging.info(f"CER: {cer:.3g}")
-        logging.info("")
+    cer = char_error_rate(
+        all_hypotheses, ground_truth, tokenized=args.tgt_tokenized)
+    logging.info(f"CER: {cer:.3g}")
+    logging.info("")
 
 
 if __name__ == "__main__":
