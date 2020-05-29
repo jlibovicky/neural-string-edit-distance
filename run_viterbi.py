@@ -34,6 +34,7 @@ def main():
                         default=sys.stdin)
     parser.add_argument("--src-tokenized", default=False, action="store_true")
     parser.add_argument("--tgt-tokenized", default=False, action="store_true")
+    parser.add_argument("--output-format", default="nice", choices=["nice", "tsv"])
     args = parser.parse_args()
 
     model = torch.load(args.model)
@@ -60,17 +61,24 @@ def main():
             torch.tensor([string_1_idx]).cuda(),
             torch.tensor([string_2_idx]).cuda())
 
-        print(f"{string_1} -> {string_2}")
+        if args.output_format == "nice":
+            print(f"{string_1} ⇨ {string_2}")
+
         readable_ops = []
-        for op, chars in edit_ops:
+        for op, chars in edit_ops[1:-1]:
             if op == "delete":
                 readable_ops.append(f"-{src_vocab[chars]}")
             if op == "insert":
                 readable_ops.append(f"+{tgt_vocab[chars]}")
             if op == "subs":
-                readable_ops.append(f"{src_vocab[chars[0]]}>{tgt_vocab[chars[1]]}")
-        print(" ".join(readable_ops))
-        print()
+                readable_ops.append(f"{src_vocab[chars[0]]}→{tgt_vocab[chars[1]]}")
+
+        if args.output_format == "nice":
+            print(" ".join(readable_ops))
+            print()
+        if args.output_format == "tsv":
+            print(string_1, string_2, " ".join(readable_ops), sep="\t")
+
 
 
 if __name__ == "__main__":

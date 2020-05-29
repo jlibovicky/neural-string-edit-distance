@@ -84,6 +84,25 @@ class EditDistBase(nn.Module):
         raise RuntimeError("Unknown table type.")
 
 
+def get_distortion_mask(max_size=512):
+    """Mask to be applied on alpha during training.
+
+    The purpose of the distrotion maks is to dicourage the model from making
+    states far from diagonal too probable. In other words, discourage the model
+    from considering: delete everything and then insert everything to be a good
+    output.
+    """
+
+    mask = []
+    for i in range(max_size):
+        row = []
+        for j in range(max_size):
+            row.append(max(0, abs(i - j) - 1))
+        mask.append(row)
+    return torch.tensor(mask).float().unsqueeze(0)
+
+
+
 class NeuralEditDistBase(EditDistBase):
     def __init__(self, ar_vocab, en_vocab, device, directed=False,
                  encoder_decoder_attention=True,
@@ -138,6 +157,9 @@ class NeuralEditDistBase(EditDistBase):
         self.substitution_proj = nn.Linear(
             proj_source, self.subs_classes)
         self.extra_proj = nn.Linear(proj_source, self.extra_classes)
+
+        self.distortion_mask = get_distortion_mask().to(device)
+
 
     def _encoder_for_vocab(self, vocab, directed=False):
         if self.model_type == "transformer":
@@ -411,8 +433,14 @@ class NeuralEditDistBase(EditDistBase):
         expected_counts -= expected_counts.logsumexp(3, keepdim=True)
         return beta, expected_counts
 
+    def _alpha_distortion_penalty(self, src_len, tgt_len, alpha_table):
+        """Penalty for the alphas being too high outside from the diagonal."""
+        penalties = self.distortion_mask[:, :src_len, :tgt_len]
+        return alpha_table.exp() * penalties
+
     @torch.no_grad()
     def viterbi(self, ar_sent, en_sent):
+        """Get a single best sequence of edit ops for a string pair."""
         assert ar_sent.size(0) == 1
         ar_len, en_len, _, action_scores, _, _ = self._action_scores(
             ar_sent, en_sent)
@@ -464,7 +492,7 @@ class NeuralEditDistBase(EditDistBase):
         v = en_len - 1
         while t > 0 or v > 0:
             if actions[t, v] == 1:
-                operations.append(("delete", ar_sent[0, t].cpu().numpy()))
+                operations.append(("delete", ar_sent[0, t - 1].cpu().numpy()))
                 t -= 1
             elif actions[t, v] == 0:
                 operations.append(("insert", en_sent[0, v].cpu().numpy()))
@@ -472,7 +500,7 @@ class NeuralEditDistBase(EditDistBase):
             elif actions[t, v] == 2:
                 operations.append(
                     ("subs",
-                     (ar_sent[0, t].cpu().numpy(),
+                     (ar_sent[0, t - 1].cpu().numpy(),
                       en_sent[0, v].cpu().numpy())))
                 v -= 1
                 t -= 1
@@ -545,6 +573,9 @@ class EditDistNeuralModelProgressive(NeuralEditDistBase):
             pad_symbol=pad_symbol)
 
     def forward(self, ar_sent, en_sent):
+        b_range = torch.arange(ar_sent.size(0))
+        ar_lengths = (ar_sent != self.ar_pad).int().sum(1) - 1
+        en_lengths = (en_sent != self.en_pad).int().sum(1) - 1
         (ar_len, en_len, feature_table, action_scores,
             insertion_logits, subs_logits) = self._action_scores(
                 ar_sent, en_sent)
@@ -566,8 +597,12 @@ class EditDistNeuralModelProgressive(NeuralEditDistBase):
             next_symbol_logprobs_sum -
             next_symbol_logprobs_sum.logsumexp(2, keepdims=True))
 
+        distorted_probs = self._alpha_distortion_penalty(
+            ar_len, en_len, alpha)
+
         return (action_scores, torch.exp(expected_counts),
-                alpha[-1, -1], next_symbol_logprobs)
+                alpha[b_range, ar_lengths, en_lengths],
+                next_symbol_logprobs, distorted_probs)
 
     @torch.no_grad()
     def _scores_for_next_step(
@@ -588,6 +623,7 @@ class EditDistNeuralModelProgressive(NeuralEditDistBase):
             Logits for the next symbols.
         """
 
+        insertion_scores = (
             F.log_softmax(
                 self.insertion_proj(feature_table[b_range, :, v - 1:v]),
                 dim=-1)

@@ -23,25 +23,27 @@ def main():
     parser.add_argument("--em-loss", default=None, type=float)
     parser.add_argument("--sampled-em-loss", default=None, type=float)
     parser.add_argument("--nll-loss", default=None, type=float)
+    parser.add_argument("--distortion-loss", default=None, type=float)
+    parser.add_argument("--final-state-loss", default=None, type=float)
     parser.add_argument("--model-type", default='transformer',
                         choices=["transformer", "rnn", "embeddings", "cnn"])
-    parser.add_argument("--embedding-dim", default=64, type=int)
+    parser.add_argument("--embedding-dim", default=256, type=int)
     parser.add_argument("--window", default=3, type=int)
-    parser.add_argument("--hidden-size", default=64, type=int)
+    parser.add_argument("--hidden-size", default=256, type=int)
     parser.add_argument("--attention-heads", default=4, type=int)
     parser.add_argument("--no-enc-dec-att", default=False, action="store_true")
     parser.add_argument("--layers", default=2, type=int)
-    parser.add_argument("--batch-size", default=32, type=int)
-    parser.add_argument("--delay-update", default=1, type=int,
+    parser.add_argument("--batch-size", default=128, type=int)
+    parser.add_argument("--delay-update", default=4, type=int,
                         help="Update model every N steps.")
-    parser.add_argument("--epochs", default=10, type=int)
+    parser.add_argument("--epochs", default=10000, type=int)
     parser.add_argument("--src-tokenized", default=False, action="store_true",
                         help="If true, source side are space separated tokens.")
     parser.add_argument("--tgt-tokenized", default=False, action="store_true",
                         help="If true, target side are space separated tokens.")
     parser.add_argument("--patience", default=2, type=int,
                         help="Number of validations witout improvement before finishing.")
-    parser.add_argument("--lr-decrease-count", default=20, type=int,
+    parser.add_argument("--lr-decrease-count", default=10, type=int,
                         help="Number of validations witout improvement before finishing.")
     parser.add_argument("--lr-decrease-ratio", default=0.7, type=float,
                         help="Number of validations witout improvement before finishing.")
@@ -64,7 +66,9 @@ def main():
         f"_patence{args.patience}" +
         f"_nll{args.nll_loss}" +
         f"_EMloss{args.em_loss}" +
-        f"_sampledEMloss{args.sampled_em_loss}")
+        f"_sampledEMloss{args.sampled_em_loss}" +
+        f"_finalStateLoss{args.final_state_loss}" +
+        f"_distortion{args.distortion_loss}")
     experiment_dir = experiment_logging(
         f"edit_gen_{experiment_params}_{get_timestamp()}", args)
     model_path = os.path.join(experiment_dir, "model.pt")
@@ -123,7 +127,7 @@ def main():
             step += 1
 
             (action_scores, expected_counts,
-                logprob, next_symbol_score) = model(
+                logprob, next_symbol_score, distorted_probs) = model(
                 train_ex.ar, train_ex.en)
 
             en_mask = (train_ex.en != model.en_pad).float()
@@ -167,11 +171,23 @@ def main():
                     en_mask[:, 1:].sum())
                 loss += args.nll_loss * nll_loss
 
+            distortion_loss = 0
+            if args.distortion_loss is not None:
+                distortion_loss = (table_mask * distorted_probs).sum() / table_mask.sum()
+                loss += args.distortion_loss * distortion_loss
+
+            final_state_loss = 0
+            if args.final_state_loss is not None:
+                final_state_loss = -logprob.mean()
+                loss += args.final_state_loss * final_state_loss
+
             loss.backward()
 
             if step % args.delay_update == args.delay_update - 1:
                 logging.info(f"step: {step}, train loss = {loss:.3g} "
                       f"(NLL {nll_loss:.3g}, "
+                      f"distortion: {distortion_loss:.3g}, "
+                      f"final state NLL: {final_state_loss:.3g}, "
                       f"EM: {kl_loss:.3g}, "
                       f"sampled EM: {sampled_em_loss:.3g})")
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -251,38 +267,39 @@ def main():
     model = torch.load(model_path)
     model.eval()
 
-    sources = []
-    ground_truth = []
-    hypotheses = []
+    for beam in range(1, 10):
+        sources = []
+        ground_truth = []
+        hypotheses = []
 
-    for j, test_ex in enumerate(test_iter):
-        with torch.no_grad():
-            decoded_val = model.beam_search(test_ex.ar, beam_size=3)
+        for j, test_ex in enumerate(test_iter):
+            with torch.no_grad():
+                decoded_val = model.beam_search(test_ex.ar, beam_size=beam)
 
-            for ar, en, hyp in zip(test_ex.ar, test_ex.en, decoded_val):
-                src_string = decode_ids(ar, ar_text_field, args.src_tokenized)
-                tgt_string = decode_ids(en, en_text_field, args.tgt_tokenized)
-                hypothesis = decode_ids(hyp, en_text_field, args.tgt_tokenized)
+                for ar, en, hyp in zip(test_ex.ar, test_ex.en, decoded_val):
+                    src_string = decode_ids(ar, ar_text_field, args.src_tokenized)
+                    tgt_string = decode_ids(en, en_text_field, args.tgt_tokenized)
+                    hypothesis = decode_ids(hyp, en_text_field, args.tgt_tokenized)
 
-                sources.append(src_string)
-                ground_truth.append(tgt_string)
-                hypotheses.append(hypothesis)
+                    sources.append(src_string)
+                    ground_truth.append(tgt_string)
+                    hypotheses.append(hypothesis)
 
-            if j == 0:
-                for src, hyp, tgt in zip(sources[:10], hypotheses, ground_truth):
-                    logging.info("")
-                    logging.info(f"'{src}' -> '{hyp}' ({tgt})")
+                if j == 0:
+                    for src, hyp, tgt in zip(sources[:10], hypotheses, ground_truth):
+                        logging.info("")
+                        logging.info(f"'{src}' -> '{hyp}' ({tgt})")
 
-    logging.info("")
+        logging.info("")
 
-    wer = 1 - sum(
-        float(gt == hyp) for gt, hyp
-        in zip(ground_truth, hypotheses)) / len(ground_truth)
-    cer = char_error_rate(hypotheses, ground_truth, args.tgt_tokenized)
+        wer = 1 - sum(
+            float(gt == hyp) for gt, hyp
+            in zip(ground_truth, hypotheses)) / len(ground_truth)
+        cer = char_error_rate(hypotheses, ground_truth, args.tgt_tokenized)
 
-    logging.info(f"WER: {wer:.3g}")
-    logging.info(f"CER: {cer:.3g}")
-    logging.info("")
+        logging.info(f"WER: {wer:.3g}")
+        logging.info(f"CER: {cer:.3g}")
+        logging.info("")
 
 
 if __name__ == "__main__":
