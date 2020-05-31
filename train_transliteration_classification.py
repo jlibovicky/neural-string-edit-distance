@@ -29,6 +29,7 @@ def main():
     parser.add_argument("--delay-update", default=1, type=int,
                         help="Update model every N steps.")
     parser.add_argument("--epochs", default=10, type=int)
+    parser.add_argument("--interpretation-loss", default=None, type=float)
     parser.add_argument("--src-tokenized", default=False, action="store_true",
                         help="If true, source side are space separated tokens.")
     parser.add_argument("--tgt-tokenized", default=False, action="store_true",
@@ -45,6 +46,7 @@ def main():
         f"_hidden{args.hidden_size}" +
         f"_attheads{args.attention_heads}" +
         f"_layers{args.layers}" +
+        f"_interpretationLoss{args.interpretation_loss}" +
         f"_batch{args.batch_size}" +
         f"_patence{args.patience}")
     experiment_dir = experiment_logging(
@@ -87,6 +89,9 @@ def main():
     model = EditDistNeuralModelConcurrent(
         ar_text_field.vocab, en_text_field.vocab, device,
         model_type=args.model_type,
+        hidden_dim=args.hidden_size,
+        hidden_layers=args.layers,
+        attention_heads=args.attention_heads,
         share_encoders=args.share_encoders).to(device)
 
     class_loss = nn.BCELoss()
@@ -115,7 +120,7 @@ def main():
 
             action_mask = ar_mask.unsqueeze(2) * en_mask.unsqueeze(1)
 
-            action_scores, expected_counts, logprobs = model(
+            action_scores, expected_counts, logprobs, distorted_probs = model(
                 train_batch.ar, train_batch.en)
 
             bce_loss = class_loss(logprobs.exp(), target)
@@ -133,12 +138,18 @@ def main():
                 (action_mask * neg_mask).reshape(-1) * neg_samples_loss).mean()
             loss = pos_loss + neg_loss + bce_loss
 
+            distortion_loss = 0
+            if args.interpretation_loss is not None:
+                distortion_loss = (action_mask * distorted_probs).sum() / action_mask.sum()
+                loss += args.interpretation_loss * distortion_loss
+
             loss.backward()
 
             logging.info(f"step: {step}, train loss = {loss:.3g} "
                          f"(positive: {pos_loss:.3g}, "
                          f"negative: {neg_loss:.3g}, "
-                         f"BCE: {bce_loss:.3g})")
+                         f"BCE: {bce_loss:.3g}), "
+                         f"distortion: {distortion_loss:.3g})")
             optimizer.step()
             optimizer.zero_grad()
 

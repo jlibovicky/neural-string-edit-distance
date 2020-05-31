@@ -530,15 +530,18 @@ class EditDistNeuralModelConcurrent(NeuralEditDistBase):
         b_range = torch.arange(batch_size)
         ar_lengths = (ar_sent != self.ar_pad).int().sum(1) - 1
         en_lengths = (en_sent != self.en_pad).int().sum(1) - 1
-        ar_len, en_len, feature_table, action_scores, _, _ = self._action_scores(
+        ar_len, en_len, _, action_scores, _, _ = self._action_scores(
             ar_sent, en_sent)
 
         alpha = self._forward_evaluation(ar_sent, en_sent, action_scores)
         _, expected_counts = self._backward_evalatuion_and_expectation(
             ar_len, en_len, ar_sent, en_sent, alpha, action_scores)
 
+        distorted_probs = self._alpha_distortion_penalty(
+            ar_len, en_len, alpha)
+
         return (action_scores, torch.exp(expected_counts),
-                alpha[b_range, ar_lengths, en_lengths])
+                alpha[b_range, ar_lengths, en_lengths], distorted_probs)
 
     @torch.no_grad()
     def probabilities(self, ar_sent, en_sent):
