@@ -148,7 +148,7 @@ def main():
             logging.info(f"step: {step}, train loss = {loss:.3g} "
                          f"(positive: {pos_loss:.3g}, "
                          f"negative: {neg_loss:.3g}, "
-                         f"BCE: {bce_loss:.3g}), "
+                         f"BCE: {bce_loss:.3g}, "
                          f"distortion: {distortion_loss:.3g})")
             optimizer.step()
             optimizer.zero_grad()

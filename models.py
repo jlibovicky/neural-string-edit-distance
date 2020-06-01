@@ -520,6 +520,8 @@ class EditDistNeuralModelConcurrent(NeuralEditDistBase):
             ar_vocab, en_vocab, device, directed,
             encoder_decoder_attention=False,
             share_encoders=share_encoders,
+            hidden_dim=hidden_dim, hidden_layers=hidden_layers,
+            attention_heads=attention_heads,
             table_type="tiny", extra_classes=1,
             start_symbol=start_symbol, end_symbol=end_symbol,
             pad_symbol=pad_symbol, model_type=model_type)
