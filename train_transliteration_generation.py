@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
 
+"""Sequence generation using neural string edit distance.
+
+The data directory is expected to contains files {train,eval,text}.txt with
+tab-separated source and target strings.
+"""
+
 import argparse
 import logging
 import os
@@ -33,6 +39,8 @@ def main():
     parser.add_argument("--attention-heads", default=4, type=int)
     parser.add_argument("--no-enc-dec-att", default=False, action="store_true")
     parser.add_argument("--layers", default=2, type=int)
+    parser.add_argument("--beam-size", type=int, default=5,
+                        help="Beam size for test data decoding.")
     parser.add_argument("--batch-size", default=128, type=int)
     parser.add_argument("--delay-update", default=4, type=int,
                         help="Update model every N steps.")
@@ -42,12 +50,13 @@ def main():
     parser.add_argument("--tgt-tokenized", default=False, action="store_true",
                         help="If true, target side are space separated tokens.")
     parser.add_argument("--patience", default=2, type=int,
-                        help="Number of validations witout improvement before finishing.")
+                        help="Number of validations witout improvement before decreasing learning rate.")
     parser.add_argument("--lr-decrease-count", default=10, type=int,
-                        help="Number of validations witout improvement before finishing.")
+                        help="Number learning rate decays before early stopping.")
     parser.add_argument("--lr-decrease-ratio", default=0.7, type=float,
-                        help="Number of validations witout improvement before finishing.")
-    parser.add_argument("--learning-rate", default=1e-4, type=float)
+                        help="Factor by which the learning rate is decayed.")
+    parser.add_argument("--learning-rate", default=1e-4, type=float,
+                        help="Initial learning rate.")
     args = parser.parse_args()
 
     if args.nll_loss is None and args.em_loss is None and args.sampled_em_loss is None:
@@ -267,39 +276,38 @@ def main():
     model = torch.load(model_path)
     model.eval()
 
-    for beam in range(1, 10):
-        sources = []
-        ground_truth = []
-        hypotheses = []
+    sources = []
+    ground_truth = []
+    hypotheses = []
 
-        for j, test_ex in enumerate(test_iter):
-            with torch.no_grad():
-                decoded_val = model.beam_search(test_ex.ar, beam_size=beam)
+    for j, test_ex in enumerate(test_iter):
+        with torch.no_grad():
+            decoded_val = model.beam_search(test_ex.ar, beam_size=args.beam_size)
 
-                for ar, en, hyp in zip(test_ex.ar, test_ex.en, decoded_val):
-                    src_string = decode_ids(ar, ar_text_field, args.src_tokenized)
-                    tgt_string = decode_ids(en, en_text_field, args.tgt_tokenized)
-                    hypothesis = decode_ids(hyp, en_text_field, args.tgt_tokenized)
+            for ar, en, hyp in zip(test_ex.ar, test_ex.en, decoded_val):
+                src_string = decode_ids(ar, ar_text_field, args.src_tokenized)
+                tgt_string = decode_ids(en, en_text_field, args.tgt_tokenized)
+                hypothesis = decode_ids(hyp, en_text_field, args.tgt_tokenized)
 
-                    sources.append(src_string)
-                    ground_truth.append(tgt_string)
-                    hypotheses.append(hypothesis)
+                sources.append(src_string)
+                ground_truth.append(tgt_string)
+                hypotheses.append(hypothesis)
 
-                if j == 0:
-                    for src, hyp, tgt in zip(sources[:10], hypotheses, ground_truth):
-                        logging.info("")
-                        logging.info(f"'{src}' -> '{hyp}' ({tgt})")
+            if j == 0:
+                for src, hyp, tgt in zip(sources[:10], hypotheses, ground_truth):
+                    logging.info("")
+                    logging.info(f"'{src}' -> '{hyp}' ({tgt})")
 
-        logging.info("")
+    logging.info("")
 
-        wer = 1 - sum(
-            float(gt == hyp) for gt, hyp
-            in zip(ground_truth, hypotheses)) / len(ground_truth)
-        cer = char_error_rate(hypotheses, ground_truth, args.tgt_tokenized)
+    wer = 1 - sum(
+        float(gt == hyp) for gt, hyp
+        in zip(ground_truth, hypotheses)) / len(ground_truth)
+    cer = char_error_rate(hypotheses, ground_truth, args.tgt_tokenized)
 
-        logging.info(f"WER: {wer:.3g}")
-        logging.info(f"CER: {cer:.3g}")
-        logging.info("")
+    logging.info(f"WER: {wer:.3g}")
+    logging.info(f"CER: {cer:.3g}")
+    logging.info("")
 
 
 if __name__ == "__main__":

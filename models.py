@@ -1,3 +1,5 @@
+"""Neural string edit distance."""
+
 import math
 
 import torch
@@ -14,6 +16,7 @@ MINF = torch.log(torch.tensor(0.))
 
 
 class EditDistBase(nn.Module):
+    """Base class used both for statistical and neural model."""
     def __init__(self, ar_vocab, en_vocab, start_symbol,
                  end_symbol, pad_symbol, table_type="full", extra_classes=0):
         super(EditDistBase, self).__init__()
@@ -102,8 +105,12 @@ def get_distortion_mask(max_size=512):
     return torch.tensor(mask).float().unsqueeze(0)
 
 
-
 class NeuralEditDistBase(EditDistBase):
+    """Base class for neural models.
+
+    Implements the forward and bakward probability computation, the EM loss
+    function and Viterbi decoding.
+    """
     def __init__(self, ar_vocab, en_vocab, device, directed=False,
                  encoder_decoder_attention=True,
                  share_encoders=False,
@@ -229,6 +236,7 @@ class NeuralEditDistBase(EditDistBase):
             inputs, attention_mask=mask)[0]
 
     def _action_scores(self, ar_sent, en_sent, inference=False):
+        """Compute possible action probabilities (Eq. 3 and 4)."""
         ar_len, en_len = ar_sent.size(1), en_sent.size(1)
         ar_mask = ar_sent != self.ar_pad
         en_mask = en_sent != self.en_pad
@@ -241,7 +249,8 @@ class NeuralEditDistBase(EditDistBase):
 
         if self.directed:
             feature_table = torch.cat(
-                (feature_table, en_vectors.unsqueeze(1).repeat(1, ar_len, 1, 1)),
+                (feature_table, en_vectors.unsqueeze(1).repeat(
+                    1, ar_len, 1, 1)),
                 dim=3)
 
         # DELETION <<<
@@ -291,7 +300,7 @@ class NeuralEditDistBase(EditDistBase):
                 valid_subs_logits)
 
     def _forward_evaluation(self, ar_sent, en_sent, action_scores):
-        """Differentiable forward pass through the model."""
+        """Differentiable forward pass through the model. Algorithm 1."""
         alpha = []
         batch_size = ar_sent.size(0)
         b_range = torch.arange(batch_size).to(self.device)
@@ -336,8 +345,12 @@ class NeuralEditDistBase(EditDistBase):
     @torch.no_grad()
     def _backward_evalatuion_and_expectation(
             self, ar_len, en_len, ar_sent, en_sent, alpha, action_scores):
-        # This is the backward pass through the edit distance table.
-        # Unlike, the forward pass it does not have to be differentiable.
+        """The backward pass through the edit distance table. Algorithm 2.
+
+        Unlike, the forward pass it does not have to be differentiable, because
+        it is only used to compute the expected distribution that is as a
+        "target" in the EM loss.
+        """
         plausible_deletions = torch.full_like(action_scores, MINF)
         plausible_insertions = torch.full_like(action_scores, MINF)
         plausible_substitutions = torch.full_like(action_scores, MINF)
@@ -511,6 +524,7 @@ class NeuralEditDistBase(EditDistBase):
 
 
 class EditDistNeuralModelConcurrent(NeuralEditDistBase):
+    """Model for binary sequence-pari classification."""
     def __init__(self, ar_vocab, en_vocab, device, directed=False,
                  hidden_dim=32, hidden_layers=2, attention_heads=4,
                  share_encoders=False,
@@ -525,7 +539,6 @@ class EditDistNeuralModelConcurrent(NeuralEditDistBase):
             table_type="tiny", extra_classes=1,
             start_symbol=start_symbol, end_symbol=end_symbol,
             pad_symbol=pad_symbol, model_type=model_type)
-
 
     def forward(self, ar_sent, en_sent):
         batch_size = ar_sent.size(0)
@@ -563,6 +576,7 @@ class EditDistNeuralModelConcurrent(NeuralEditDistBase):
 
 
 class EditDistNeuralModelProgressive(NeuralEditDistBase):
+    """Model for sequence generation."""
     def __init__(self, ar_vocab, en_vocab, device, directed=True,
                  hidden_dim=32, hidden_layers=2, attention_heads=4,
                  window=3,
@@ -649,7 +663,8 @@ class EditDistNeuralModelProgressive(NeuralEditDistBase):
 
     @torch.no_grad()
     def _update_alpha_with_new_row(
-            self, batch_size, b_range, v, alpha, action_scores, ar_sent, en_sent, ar_len):
+            self, batch_size, b_range, v, alpha, action_scores, ar_sent,
+            en_sent, ar_len):
         """Update the probabilities table for newly decoded characters.
 
         Here, we add a row to the alpha table (probabilities of edit states)
@@ -794,7 +809,6 @@ class EditDistNeuralModelProgressive(NeuralEditDistBase):
                 next_symb_scores.reshape(batch_size, current_beam, -1))
 
             # reshape for beam members and get top k
-            #print(candidate_scores.shape)
             best_scores, best_indices = candidate_scores.reshape(
                 batch_size, -1).topk(beam_size, dim=-1)
             next_symbol_ids = best_indices % self.en_symbol_count
@@ -816,7 +830,8 @@ class EditDistNeuralModelProgressive(NeuralEditDistBase):
             reordered_finished = flat_finished.index_select(
                 0, global_best_indices)
             finished_now = (
-                next_symbol_ids.view(-1, 1) == self.en_eos + reordered_finished[:, -1:])
+                next_symbol_ids.view(-1, 1) == self.en_eos
+                + reordered_finished[:, -1:])
             finished = torch.cat((
                 reordered_finished,
                 finished_now), dim=1).reshape(batch_size, beam_size, -1)

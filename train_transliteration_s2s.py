@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
 
+"""Sequence generation using standard encoder-decoder models.
+
+The data directory is expected to contains files {train,eval,text}.txt with
+tab-separated source and target strings.
+"""
+
 import argparse
 import datetime
 import logging

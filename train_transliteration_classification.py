@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
 
+"""Binary classification model using neural string edit distance.
+
+The data directory is expected to contains files {train,eval,text}.txt with
+tab-separated values <str1>\\t<str2>\\t{0,1} where 1 is the True label and 0 is
+the False label.
+"""
+
 import argparse
 import logging
 import os
