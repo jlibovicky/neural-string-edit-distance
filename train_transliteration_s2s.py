@@ -185,11 +185,11 @@ def main():
     parser.add_argument("--epochs", default=100, type=int)
     parser.add_argument("--model-type", default='transformer',
                         choices=["transformer", "rnn"])
-    parser.add_argument("--embedding-dim", default=64, type=int)
-    parser.add_argument("--hidden-size", default=128, type=int)
+    parser.add_argument("--embedding-dim", default=256, type=int)
+    parser.add_argument("--hidden-size", default=256, type=int)
     parser.add_argument("--attention-heads", default=4, type=int)
     parser.add_argument("--layers", default=2, type=int)
-    parser.add_argument("--batch-size", default=32, type=int)
+    parser.add_argument("--batch-size", default=512, type=int)
     parser.add_argument(
         "--src-tokenized", default=False, action="store_true",
         help="If true, source side are space separated tokens.")
