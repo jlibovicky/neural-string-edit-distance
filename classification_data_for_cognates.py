@@ -27,7 +27,7 @@ def main():
     print("Dataset loaded in memory.", file=sys.stderr)
 
     classification_examples = []
-    for clazz, instances in per_class_listing.items():
+    for _, instances in per_class_listing.items():
         for inst1 in instances:
             for inst2 in instances:
                 classification_examples.append(f"{inst1}\t{inst2}\t1")
@@ -46,7 +46,7 @@ def main():
         inst1 = random.choice(per_class_listing[cls_1])
         inst2 = random.choice(per_class_listing[cls_2])
         classification_examples.append(f"{inst1}\t{inst2}\t0")
-    print(f"Generated negative samples.", file=sys.stderr)
+    print("Generated negative samples.", file=sys.stderr)
 
     random.shuffle(classification_examples)
 

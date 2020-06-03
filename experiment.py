@@ -2,7 +2,6 @@ import datetime
 import logging
 import os
 import subprocess
-import sys
 
 from typing import List
 
@@ -18,12 +17,12 @@ def save_git_info(git_commit_file: str, git_diff_file: str,
 
     with open(git_commit_file, "wb") as file:
         subprocess.run(["git", "log", "-1", "--format=%H", branch],
-               cwd=repo_dir, stdout=file)
+                       cwd=repo_dir, stdout=file, check=False)
 
     with open(git_diff_file, "wb") as file:
         subprocess.run(
-        ["git", "--no-pager", "diff", "--color=always", branch],
-        cwd=repo_dir, stdout=file)
+            ["git", "--no-pager", "diff", "--color=always", branch],
+            cwd=repo_dir, stdout=file, check=False)
 
 
 def experiment_logging(experiment_id: str, args) -> str:
@@ -37,7 +36,8 @@ def experiment_logging(experiment_id: str, args) -> str:
     with open(os.path.join(experiment_dir, "args"), "w") as file:
         print(yaml.dump(args.__dict__), file=file)
 
-    log_handler = fileHandler = logging.FileHandler(os.path.join(experiment_dir, "train.log"))
+    log_handler = logging.FileHandler(
+        os.path.join(experiment_dir, "train.log"))
     log_handler.setFormatter(logging.Formatter('%(asctime)s %(message)s'))
     logging.getLogger().addHandler(log_handler)
 

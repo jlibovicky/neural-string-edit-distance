@@ -1,11 +1,8 @@
 """Neural string edit distance."""
 
-import math
-
 import torch
-from torch import nn, optim
+from torch import nn
 from torch.functional import F
-from torchtext import data
 
 from transformers import BertConfig, BertModel
 
@@ -144,7 +141,8 @@ class NeuralEditDistBase(EditDistBase):
         if model_type == "bert" or share_encoders:
             self.en_encoder = self.ar_encoder
         else:
-            self.en_encoder = self._encoder_for_vocab(en_vocab, directed=directed)
+            self.en_encoder = self._encoder_for_vocab(
+                en_vocab, directed=directed)
 
         self.projection = nn.Sequential(
             nn.Dropout(0.1),
@@ -235,7 +233,7 @@ class NeuralEditDistBase(EditDistBase):
         return self.en_encoder(
             inputs, attention_mask=mask)[0]
 
-    def _action_scores(self, ar_sent, en_sent, inference=False):
+    def _action_scores(self, ar_sent, en_sent):
         """Compute possible action probabilities (Eq. 3 and 4)."""
         ar_len, en_len = ar_sent.size(1), en_sent.size(1)
         ar_mask = ar_sent != self.ar_pad
@@ -488,7 +486,8 @@ class NeuralEditDistBase(EditDistBase):
                     possible_actions.append((-1e12, 1.0, 1))
                 if v >= 1 and t >= 1:
                     possible_actions.append(
-                        (action_scores[t, v, subsitute_id] + alpha[t - 1, v - 1],
+                        ((action_scores[t, v, subsitute_id] +
+                            alpha[t - 1, v - 1]),
                          action_count[t - 1, v - 1] + 1, 2))
                 else:
                     possible_actions.append((-1e12, 1.0, 2))
@@ -525,11 +524,8 @@ class NeuralEditDistBase(EditDistBase):
     @torch.no_grad()
     def alpha(self, ar_sent, en_sent):
         batch_size = ar_sent.size(0)
-        b_range = torch.arange(batch_size)
-        ar_lengths = (ar_sent != self.ar_pad).int().sum(1) - 1
-        en_lengths = (en_sent != self.en_pad).int().sum(1) - 1
-        ar_len, en_len, feature_table, action_scores, _, _ = self._action_scores(
-            ar_sent, en_sent)
+        _, _, _, action_scores, _, _ = (
+            self._action_scores(ar_sent, en_sent))
 
         alphas = self._forward_evaluation(ar_sent, en_sent, action_scores)
 
@@ -576,8 +572,8 @@ class EditDistNeuralModelConcurrent(NeuralEditDistBase):
         b_range = torch.arange(batch_size)
         ar_lengths = (ar_sent != self.ar_pad).int().sum(1) - 1
         en_lengths = (en_sent != self.en_pad).int().sum(1) - 1
-        ar_len, en_len, feature_table, action_scores, _, _ = self._action_scores(
-            ar_sent, en_sent)
+        _, _, _, action_scores, _, _ = (
+            self._action_scores(ar_sent, en_sent))
 
         alpha = self._forward_evaluation(ar_sent, en_sent, action_scores)
 
@@ -607,12 +603,12 @@ class EditDistNeuralModelProgressive(NeuralEditDistBase):
         b_range = torch.arange(ar_sent.size(0))
         ar_lengths = (ar_sent != self.ar_pad).int().sum(1) - 1
         en_lengths = (en_sent != self.en_pad).int().sum(1) - 1
-        (ar_len, en_len, feature_table, action_scores,
+        (ar_len, en_len, _, action_scores,
             insertion_logits, subs_logits) = self._action_scores(
                 ar_sent, en_sent)
 
         alpha = self._forward_evaluation(ar_sent, en_sent, action_scores)
-        beta, expected_counts = self._backward_evalatuion_and_expectation(
+        _, expected_counts = self._backward_evalatuion_and_expectation(
             ar_len, en_len, ar_sent, en_sent, alpha, action_scores)
 
         insertion_log_dist = (
@@ -730,8 +726,7 @@ class EditDistNeuralModelProgressive(NeuralEditDistBase):
 
         en_sent = torch.tensor([[self.en_bos]] * batch_size).to(self.device)
         (ar_len, en_len, feature_table,
-         action_scores, _, _) = self._action_scores(
-            ar_sent, en_sent, inference=True)
+         action_scores, _, _) = self._action_scores(ar_sent, en_sent)
         log_ar_mask = torch.where(
             ar_sent == self.ar_pad,
             torch.full_like(ar_sent, MINF, dtype=torch.float),
@@ -763,7 +758,7 @@ class EditDistNeuralModelProgressive(NeuralEditDistBase):
             en_sent = torch.cat((en_sent, next_symbol), dim=1)
 
             ar_len, en_len, feature_table, action_scores, _, _ = self._action_scores(
-                ar_sent, en_sent, inference=True)
+                ar_sent, en_sent)
             finished += next_symbol.squeeze(1) == self.en_eos
 
             alpha = self. _update_alpha_with_new_row(
@@ -790,7 +785,7 @@ class EditDistNeuralModelProgressive(NeuralEditDistBase):
             (batch_size, 1, 1), self.en_bos, dtype=torch.long).to(self.device)
         (ar_len, en_len, feature_table,
          action_scores, _, _) = self._action_scores(
-            ar_sent, decoded.squeeze(1), inference=True)
+            ar_sent, decoded.squeeze(1))
 
         alpha = torch.full((batch_size, 1, ar_len, 1), MINF).to(self.device)
         for t, ar_char in enumerate(ar_sent.transpose(0, 1)):
@@ -866,7 +861,7 @@ class EditDistNeuralModelProgressive(NeuralEditDistBase):
             flat_finished = finished.reshape(-1, cur_len + 1)
             (ar_len, en_len, feature_table,
                 action_scores, _, _) = self._action_scores(
-                    ar_sent, flat_decoded, inference=True)
+                    ar_sent, flat_decoded)
             flat_alpha = self. _update_alpha_with_new_row(
                 flat_decoded.size(0), b_range, cur_len, flat_alpha,
                 action_scores, ar_sent, flat_decoded, ar_len)

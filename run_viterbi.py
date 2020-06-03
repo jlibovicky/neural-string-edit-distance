@@ -14,11 +14,11 @@ import torch
 logging.basicConfig(format='%(asctime)s %(message)s', level=logging.INFO)
 
 
-def load_vocab(fh):
+def load_vocab(file):
     vocab = []
-    for token in fh:
+    for token in file:
         vocab.append(token.strip())
-    fh.close()
+    file.close()
     stoi = defaultdict(int)
     for i, symb in enumerate(vocab):
         stoi[symb] = i
@@ -34,7 +34,8 @@ def main():
                         default=sys.stdin)
     parser.add_argument("--src-tokenized", default=False, action="store_true")
     parser.add_argument("--tgt-tokenized", default=False, action="store_true")
-    parser.add_argument("--output-format", default="nice", choices=["nice", "tsv"])
+    parser.add_argument("--output-format", default="nice",
+                        choices=["nice", "tsv"])
     args = parser.parse_args()
 
     model = torch.load(args.model)
@@ -65,20 +66,20 @@ def main():
             print(f"{string_1} ⇨ {string_2}")
 
         readable_ops = []
-        for op, chars in edit_ops[1:-1]:
-            if op == "delete":
+        for operation, chars in edit_ops[1:-1]:
+            if operation == "delete":
                 readable_ops.append(f"-{src_vocab[chars]}")
-            if op == "insert":
+            if operation == "insert":
                 readable_ops.append(f"+{tgt_vocab[chars]}")
-            if op == "subs":
-                readable_ops.append(f"{src_vocab[chars[0]]}→{tgt_vocab[chars[1]]}")
+            if operation == "subs":
+                readable_ops.append(
+                    f"{src_vocab[chars[0]]}→{tgt_vocab[chars[1]]}")
 
         if args.output_format == "nice":
             print(" ".join(readable_ops))
             print()
         if args.output_format == "tsv":
             print(string_1, string_2, " ".join(readable_ops), sep="\t")
-
 
 
 if __name__ == "__main__":

@@ -3,14 +3,16 @@
 
 from collections import namedtuple
 
-import torch
 from torch import nn
 from torch.functional import F
 
 from transformers.modeling_bert import BertSelfAttention
 
 
-ATT_CONFIG = namedtuple("AttConfig", ["hidden_size", "num_attention_heads", "output_attentions", "attention_probs_dropout_prob"])
+AttConfig = namedtuple(
+    "AttConfig",
+    ["hidden_size", "num_attention_heads", "output_attentions",
+     "attention_probs_dropout_prob"])
 
 
 class RNNEncoder(nn.Module):
@@ -34,7 +36,8 @@ class RNNEncoder(nn.Module):
                                 batch_first=True, bidirectional=True)
 
         self.other_grus = nn.ModuleList([
-            nn.GRU(hidden_size, hidden_size, bidirectional=True, batch_first=True)
+            nn.GRU(hidden_size, hidden_size, bidirectional=True,
+                   batch_first=True)
             for _ in range(num_layers - 1)])
 
     def forward(self, input_sequence, attention_mask):
@@ -42,24 +45,34 @@ class RNNEncoder(nn.Module):
 
         word_embeddings = self.dropout(self.embeddings(input_sequence))
         packed_embeddings = nn.utils.rnn.pack_padded_sequence(
-            word_embeddings, input_lengths, batch_first=True, enforce_sorted=False)
+            word_embeddings, input_lengths, batch_first=True,
+            enforce_sorted=False)
 
-        # Run the packed embeddings through the GRU, and then unpack the sequences
+        # Run the packed embeddings through the GRU, and then unpack the
+        # sequences
         outputs, _ = self.first_gru(packed_embeddings)
-        outputs, _ = nn.utils.rnn.pad_packed_sequence(outputs, batch_first=True)
+        outputs, _ = nn.utils.rnn.pad_packed_sequence(
+            outputs, batch_first=True)
         outputs = self.norms[0](self.dropout(
-            outputs[:, :, :self.hidden_size] + outputs[:, : ,self.hidden_size:]))
+            outputs[:, :, :self.hidden_size] +
+            outputs[:, :, self.hidden_size:]))
 
         for gru, norm in zip(self.other_grus, self.norms[1:]):
             packed_outputs = nn.utils.rnn.pack_padded_sequence(
                 outputs, input_lengths, batch_first=True,
                 enforce_sorted=False)
             next_outputs, _ = gru(packed_outputs)
-            next_outputs, _ = nn.utils.rnn.pad_packed_sequence(next_outputs, batch_first=True)
-            next_outputs = next_outputs[:, :, :self.hidden_size] + next_outputs[:, : ,self.hidden_size:]
+            next_outputs, _ = nn.utils.rnn.pad_packed_sequence(
+                next_outputs, batch_first=True)
+            next_outputs = (next_outputs[:, :, :self.hidden_size] +
+                            next_outputs[:, :, self.hidden_size:])
             outputs = norm(outputs + self.dropout(next_outputs))
 
         return outputs, None
+
+
+def dot_score(hidden_state, encoder_states):
+    return (hidden_state.unsqueeze(2) * encoder_states.unsqueeze(1)).sum(3)
 
 
 class Attention(nn.Module):
@@ -67,12 +80,8 @@ class Attention(nn.Module):
         super(Attention, self).__init__()
         self.hidden_size = hidden_size
 
-
-    def dot_score(self, hidden_state, encoder_states):
-        return (hidden_state.unsqueeze(2) * encoder_states.unsqueeze(1)).sum(3)
-
     def forward(self, hidden, keys, values, mask):
-        attn_scores = self.dot_score(hidden, keys)
+        attn_scores = dot_score(hidden, keys)
         # Apply mask so network does not attend <pad> tokens
         attn_scores = attn_scores.masked_fill(mask.unsqueeze(1) == 0, -1e10)
 
@@ -113,7 +122,8 @@ class RNNDecoder(nn.Module):
                 Attention(hidden_size) for _ in range(num_layers)])
         elif use_attention:
             self.attn = nn.ModuleList([
-                BertSelfAttention(ATT_CONFIG(hidden_size, attention_heads, False, 0.1))
+                BertSelfAttention(AttConfig(
+                    hidden_size, attention_heads, False, 0.1))
                 for _ in range(num_layers)])
 
         self.other_grus = nn.ModuleList([
@@ -127,37 +137,47 @@ class RNNDecoder(nn.Module):
                 nn.ReLU(),
                 nn.Dropout(dropout))
 
-    def forward(self, input_ids, attention_mask, encoder_hidden_states=None, encoder_attention_mask=None):
+    def forward(self, input_ids, attention_mask, encoder_hidden_states=None,
+                encoder_attention_mask=None):
         input_lengths = attention_mask.sum(1)
 
         word_embeddings = self.dropout(self.embeddings(input_ids))
         packed_embeddings = nn.utils.rnn.pack_padded_sequence(
-            word_embeddings, input_lengths, batch_first=True, enforce_sorted=False)
+            word_embeddings, input_lengths, batch_first=True,
+            enforce_sorted=False)
 
-        # Run the packed embeddings through the GRU, and then unpack the sequences
+        # Run the packed embeddings through the GRU, and then unpack
+        # the sequences
         outputs, _ = self.first_gru(packed_embeddings)
-        outputs, _ = nn.utils.rnn.pad_packed_sequence(outputs, batch_first=True)
+        outputs, _ = nn.utils.rnn.pad_packed_sequence(
+            outputs, batch_first=True)
         outputs = self.rnn_norms[0](self.dropout(outputs))
 
         if encoder_hidden_states is not None:
+            unsq_enc_att_mask = (
+                encoder_attention_mask.unsqueeze(1).unsqueeze(1))
             context = self.attn[0](
-                    outputs, encoder_hidden_states=encoder_hidden_states,
-                    encoder_attention_mask=encoder_attention_mask.unsqueeze(1).unsqueeze(1))[0]
+                outputs, encoder_hidden_states=encoder_hidden_states,
+                encoder_attention_mask=unsq_enc_att_mask)[0]
             outputs = self.ctx_norms[0](outputs + self.dropout(context))
 
         for gru, att, rnn_norm, ctx_norm in zip(
-                self.other_grus, self.attn[1:], self.rnn_norms[1:], self.ctx_norms[1:]):
+                self.other_grus, self.attn[1:],
+                self.rnn_norms[1:], self.ctx_norms[1:]):
             packed_outputs = nn.utils.rnn.pack_padded_sequence(
                 outputs, input_lengths, batch_first=True,
                 enforce_sorted=False)
             next_outputs, _ = gru(packed_outputs)
-            next_outputs, _ = nn.utils.rnn.pad_packed_sequence(next_outputs, batch_first=True)
+            next_outputs, _ = nn.utils.rnn.pad_packed_sequence(
+                next_outputs, batch_first=True)
             outputs = rnn_norm(outputs + self.dropout(next_outputs))
 
             if encoder_hidden_states is not None:
+                unsq_enc_att_mask = (
+                    encoder_attention_mask.unsqueeze(1).unsqueeze(1))
                 context = att(
                     outputs, encoder_hidden_states=encoder_hidden_states,
-                    encoder_attention_mask=encoder_attention_mask.unsqueeze(1).unsqueeze(1))[0]
+                    encoder_attention_mask=unsq_enc_att_mask)[0]
                 outputs = ctx_norm(outputs + self.dropout(context))
 
         if self.output_proj is not None:
