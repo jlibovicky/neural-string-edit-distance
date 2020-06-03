@@ -522,6 +522,18 @@ class NeuralEditDistBase(EditDistBase):
         return (torch.exp(alpha[-1, -1] / action_count[-1, -1]),
                 operations)
 
+    @torch.no_grad()
+    def alpha(self, ar_sent, en_sent):
+        batch_size = ar_sent.size(0)
+        b_range = torch.arange(batch_size)
+        ar_lengths = (ar_sent != self.ar_pad).int().sum(1) - 1
+        en_lengths = (en_sent != self.en_pad).int().sum(1) - 1
+        ar_len, en_len, feature_table, action_scores, _, _ = self._action_scores(
+            ar_sent, en_sent)
+
+        alphas = self._forward_evaluation(ar_sent, en_sent, action_scores)
+
+        return alphas
 
 class EditDistNeuralModelConcurrent(NeuralEditDistBase):
     """Model for binary sequence-pari classification."""
