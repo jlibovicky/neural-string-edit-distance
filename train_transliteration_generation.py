@@ -13,12 +13,9 @@ import os
 from tensorboardX import SummaryWriter
 import torch
 from torch import nn, optim
-from torch.functional import F
-from torchtext import data
 
 from experiment import experiment_logging, get_timestamp, save_vocab
-from models import (
-    EditDistNeuralModelConcurrent, EditDistNeuralModelProgressive)
+from models import EditDistNeuralModelProgressive
 from transliteration_utils import (
     load_transliteration_data, decode_ids, char_error_rate)
 
@@ -46,20 +43,23 @@ def main():
                         help="Update model every N steps.")
     parser.add_argument("--epochs", default=10000, type=int)
     parser.add_argument("--src-tokenized", default=False, action="store_true",
-                        help="If true, source side are space separated tokens.")
+                        help="If true, source side is space-separated.")
     parser.add_argument("--tgt-tokenized", default=False, action="store_true",
-                        help="If true, target side are space separated tokens.")
+                        help="If true, target side is space-separated.")
     parser.add_argument("--patience", default=2, type=int,
-                        help="Number of validations witout improvement before decreasing learning rate.")
+                        help="Number of validations witout improvement before "
+                             "decreasing the learning rate.")
     parser.add_argument("--lr-decrease-count", default=10, type=int,
-                        help="Number learning rate decays before early stopping.")
+                        help="Number learning rate decays before "
+                             "early stopping.")
     parser.add_argument("--lr-decrease-ratio", default=0.7, type=float,
                         help="Factor by which the learning rate is decayed.")
     parser.add_argument("--learning-rate", default=1e-4, type=float,
                         help="Initial learning rate.")
     args = parser.parse_args()
 
-    if args.nll_loss is None and args.em_loss is None and args.sampled_em_loss is None:
+    if (args.nll_loss is None and
+            args.em_loss is None and args.sampled_em_loss is None):
         parser.error("No loss was specified.")
 
     experiment_params = (
@@ -108,7 +108,7 @@ def main():
     nll = nn.NLLLoss(reduction='none').to(device)
     xent = nn.CrossEntropyLoss(reduction='none').to(device)
     optimizer = optim.Adam(
-            model.parameters(), lr=args.learning_rate)
+        model.parameters(), lr=args.learning_rate)
 
     step = 0
     best_wer = 1e9
@@ -123,21 +123,21 @@ def main():
         if remaining_decrease <= 0:
             break
 
-        for i, train_ex in enumerate(train_iter):
+        for train_ex in train_iter:
             if stalled > args.patience:
                 learning_rate *= args.lr_decrease_ratio
                 for param_group in optimizer.param_groups:
                     param_group['lr'] = learning_rate
                 remaining_decrease -= 1
                 stalled = 0
-                logging.info(f"Decreasing learning rate to {learning_rate}.")
+                logging.info("Decreasing learning rate to %f.", learning_rate)
             if remaining_decrease <= 0:
                 break
             step += 1
 
             (action_scores, expected_counts,
-                logprob, next_symbol_score, distorted_probs) = model(
-                train_ex.ar, train_ex.en)
+             logprob, next_symbol_score, distorted_probs) = model(
+                 train_ex.ar, train_ex.en)
 
             en_mask = (train_ex.en != model.en_pad).float()
             ar_mask = (train_ex.ar != model.ar_pad).float()
@@ -160,12 +160,14 @@ def main():
                 tgt_dim = action_scores.size(-1)
                 # TODO do real sampling instead of argmax
                 sampled_actions = expected_counts.argmax(3)
-                #sampled_actions = torch.multinomial(expected_counts[:, 1:, 1:].reshape(-1, tgt_dim), 1)
+                # sampled_actions = torch.multinomial(
+                #   expected_counts[:, 1:, 1:].reshape(-1, tgt_dim), 1)
                 sampled_em_loss_raw = xent(
                     action_scores[:, 1:, 1:].reshape(-1, tgt_dim),
                     sampled_actions[:, 1:, 1:].reshape(-1))
                 sampled_em_loss = (
-                    (sampled_em_loss_raw * table_mask[:, 1:, 1:].reshape(-1)).sum() /
+                    (sampled_em_loss_raw *
+                     table_mask[:, 1:, 1:].reshape(-1)).sum() /
                     table_mask.sum())
                 loss += args.sampled_em_loss * sampled_em_loss
 
@@ -182,7 +184,8 @@ def main():
 
             distortion_loss = 0
             if args.distortion_loss is not None:
-                distortion_loss = (table_mask * distorted_probs).sum() / table_mask.sum()
+                distortion_loss = (
+                    (table_mask * distorted_probs).sum() / table_mask.sum())
                 loss += args.distortion_loss * distortion_loss
 
             final_state_loss = 0
@@ -193,12 +196,12 @@ def main():
             loss.backward()
 
             if step % args.delay_update == args.delay_update - 1:
-                logging.info(f"step: {step}, train loss = {loss:.3g} "
-                      f"(NLL {nll_loss:.3g}, "
-                      f"distortion: {distortion_loss:.3g}, "
-                      f"final state NLL: {final_state_loss:.3g}, "
-                      f"EM: {kl_loss:.3g}, "
-                      f"sampled EM: {sampled_em_loss:.3g})")
+                logging.info(
+                    "step: %d, train loss = %.3g "
+                    "(NLL %.3g, distortion: %.3g, final state NLL: %.3g, "
+                    "EM: %.3g, sampled EM: %.3g)",
+                    step, loss, nll_loss, distortion_loss, final_state_loss,
+                    kl_loss, sampled_em_loss)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 optimizer.step()
                 optimizer.zero_grad()
@@ -217,10 +220,10 @@ def main():
 
                 for j, val_ex in enumerate(val_iter):
                     with torch.no_grad():
-                        #decoded_val = model.beam_search(val_ex.ar, beam_size=2)
                         decoded_val = model.decode(val_ex.ar)
 
-                        for ar, en, hyp in zip(val_ex.ar, val_ex.en, decoded_val):
+                        for ar, en, hyp in zip(
+                                val_ex.ar, val_ex.en, decoded_val):
                             src_string = decode_ids(
                                 ar, ar_text_field, args.src_tokenized)
                             tgt_string = decode_ids(
@@ -233,9 +236,11 @@ def main():
                             hypotheses.append(hypothesis)
 
                         if j == 0:
-                            for src, hyp, tgt in zip(sources[:10], hypotheses, ground_truth):
+                            for src, hyp, tgt in zip(
+                                    sources[:10], hypotheses, ground_truth):
                                 logging.info("")
-                                logging.info(f"'{src}' -> '{hyp}' ({tgt})")
+                                logging.info(
+                                    "'%s' -> '%s' (%s)", src, hyp, tgt)
 
                 logging.info("")
 
@@ -256,11 +261,13 @@ def main():
                     stalled = 0
 
                 logging.info(
-                    f"WER: {wer:.3g}   (best {best_wer:.3g}, step {best_wer_step})")
+                    "WER: %.3g   (best %.3g, step %d)",
+                    wer, best_wer, best_wer_step)
                 logging.info(
-                    f"CER: {cer:.3g}   (best {best_cer:.3g}, step {best_cer_step})")
+                    "CER: %.3g   (best %.3g, step %d)",
+                    cer, best_cer, best_cer_step)
                 if stalled > 0:
-                    logging.info(f"Stalled {stalled} times.")
+                    logging.info("Stalled %d times.", stalled)
                 else:
                     torch.save(model, model_path)
 
@@ -282,7 +289,8 @@ def main():
 
     for j, test_ex in enumerate(test_iter):
         with torch.no_grad():
-            decoded_val = model.beam_search(test_ex.ar, beam_size=args.beam_size)
+            decoded_val = model.beam_search(
+                test_ex.ar, beam_size=args.beam_size)
 
             for ar, en, hyp in zip(test_ex.ar, test_ex.en, decoded_val):
                 src_string = decode_ids(ar, ar_text_field, args.src_tokenized)
@@ -294,9 +302,10 @@ def main():
                 hypotheses.append(hypothesis)
 
             if j == 0:
-                for src, hyp, tgt in zip(sources[:10], hypotheses, ground_truth):
+                for src, hyp, tgt in zip(
+                        sources[:10], hypotheses, ground_truth):
                     logging.info("")
-                    logging.info(f"'{src}' -> '{hyp}' ({tgt})")
+                    logging.info("'%s' -> '%s' (%s)", src, hyp, tgt)
 
     logging.info("")
 
@@ -305,8 +314,8 @@ def main():
         in zip(ground_truth, hypotheses)) / len(ground_truth)
     cer = char_error_rate(hypotheses, ground_truth, args.tgt_tokenized)
 
-    logging.info(f"WER: {wer:.3g}")
-    logging.info(f"CER: {cer:.3g}")
+    logging.info("WER: %.3g", wer)
+    logging.info("CER: %.3g", cer)
     logging.info("")
 
 

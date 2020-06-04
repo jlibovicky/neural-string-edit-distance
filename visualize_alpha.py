@@ -62,12 +62,12 @@ def main():
 
     model = torch.load(args.model)
     logging.info("Model loaded.")
-    src_vocab, src_stoi = load_vocab(args.src_vocab)
-    tgt_vocab, tgt_stoi = load_vocab(args.tgt_vocab)
+    _, src_stoi = load_vocab(args.src_vocab)
+    _, tgt_stoi = load_vocab(args.tgt_vocab)
     logging.info("Vocabularies loaded.")
 
     for i, line in enumerate(args.input):
-        logging.info(f"Inference for example {i + 1}")
+        logging.info("Inference for example %d", i + 1)
         string_1, string_2 = line.strip().split("\t")
         string_1_tok = (
             ["<s>"] +
@@ -85,7 +85,7 @@ def main():
             torch.tensor([string_1_idx]).cuda(),
             torch.tensor([string_2_idx]).cuda())[0]
 
-        logging.info(f"Generating image.")
+        logging.info("Generating image.")
         draw(
             alpha.cpu().numpy(), string_1_tok, string_2_tok,
             f"{args.prefix}{i}")

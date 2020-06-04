@@ -1,9 +1,10 @@
-import re
-
 import editdistance
 from torchtext import data
 
-def load_transliteration_data(data_prefix, batch_size, device, src_tokenized=False, tgt_tokenized=False):
+
+def load_transliteration_data(
+        data_prefix, batch_size, device, src_tokenized=False,
+        tgt_tokenized=False):
     ar_text_field = data.Field(
         tokenize=(lambda s: s.split()) if src_tokenized else list,
         init_token="<s>", eos_token="</s>", batch_first=True)
@@ -51,4 +52,3 @@ def char_error_rate(hyps, refs, tokenized=False):
             continue
         cers.append(edit_ops / len(ref))
     return sum(cers) / len(cers)
-

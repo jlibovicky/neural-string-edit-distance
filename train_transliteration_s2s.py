@@ -7,7 +7,6 @@ tab-separated source and target strings.
 """
 
 import argparse
-import datetime
 import logging
 import os
 
@@ -35,7 +34,8 @@ class Seq2SeqModel(nn.Module):
         if isinstance(decoder, RNNDecoder):
             self.transposed_embeddings = decoder.embeddings.weight.t()
         else:
-            self.transposed_embeddings = decoder.embeddings.word_embeddings.weight.t()
+            self.transposed_embeddings = \
+                decoder.embeddings.word_embeddings.weight.t()
 
         self.tgt_bos_token_id = tgt_bos_token_id
         self.tgt_eos_token_id = tgt_eos_token_id
@@ -67,7 +67,8 @@ class Seq2SeqModel(nn.Module):
         encoded, _ = self.encoder(src_batch, attention_mask=input_mask)
         batch_size = encoded.size(0)
 
-        finished = [torch.tensor([False for _ in range(batch_size)]).to(self.device)]
+        finished = [
+            torch.tensor([False for _ in range(batch_size)]).to(self.device)]
         decoded = [torch.tensor([
             self.tgt_bos_token_id for _ in range(batch_size)]).to(self.device)]
 
@@ -98,13 +99,13 @@ class Seq2SeqModel(nn.Module):
         input_mask = src_batch != self.src_pad_token_id
         encoded, _ = self.encoder(src_batch, attention_mask=input_mask)
         batch_size = encoded.size(0)
-        b_range = torch.arange(batch_size)
 
         cur_len = 1
         current_beam = 1
 
         decoded = torch.full(
-            (batch_size, 1, 1), self.tgt_bos_token_id, dtype=torch.long).to(self.device)
+            (batch_size, 1, 1), self.tgt_bos_token_id,
+            dtype=torch.long).to(self.device)
         finished = torch.full(
             (batch_size, 1, 1), False, dtype=torch.bool).to(self.device)
         scores = torch.zeros((batch_size, 1)).to(self.device)
@@ -122,12 +123,11 @@ class Seq2SeqModel(nn.Module):
                 outputs[0][:, -1, :],
                 self.transposed_embeddings), dim=1)
             vocab_size = next_token_logprobs.size(1)
-            past = outputs[1]
 
             # get scores of all expanded hypotheses
             candidate_scores = (
                 scores.unsqueeze(2) +
-                next_token_logprobs.reshape(batch_size, current_beam, -1))# / cur_len
+                next_token_logprobs.reshape(batch_size, current_beam, -1))
 
             # reshape for beam members and get top k
             best_scores, best_indices = candidate_scores.reshape(
@@ -135,8 +135,8 @@ class Seq2SeqModel(nn.Module):
             next_symbol_ids = best_indices % vocab_size
             hypothesis_ids = best_indices // vocab_size
 
-            # numbering elements in the extended batch, i.e. beam size copies of
-            # each batch element
+            # numbering elements in the extended batch, i.e. beam size copies
+            # of each batch element
             beam_offset = torch.arange(
                 0, batch_size * current_beam, step=current_beam,
                 dtype=torch.long, device=self.device)
@@ -149,9 +149,10 @@ class Seq2SeqModel(nn.Module):
                     0, global_best_indices).reshape(batch_size, beam_size, -1),
                 next_symbol_ids.unsqueeze(-1)), dim=2)
             reordered_finished = flat_finished.index_select(
-                    0, global_best_indices).reshape(batch_size, beam_size, -1)
+                0, global_best_indices).reshape(batch_size, beam_size, -1)
             finished_now = (
-                next_symbol_ids == self.tgt_eos_token_id + reordered_finished[:, :, -1])
+                next_symbol_ids == self.tgt_eos_token_id +
+                reordered_finished[:, :, -1])
             finished = torch.cat((
                 reordered_finished,
                 finished_now.unsqueeze(-1)), dim=2)
@@ -167,9 +168,10 @@ class Seq2SeqModel(nn.Module):
             if cur_len == 1:
                 encoded = encoded.unsqueeze(1).repeat(
                     1, beam_size, 1, 1).reshape(
-                        batch_size * beam_size, encoded.size(1), encoded.size(2))
-                input_mask = input_mask.unsqueeze(1).repeat(1, beam_size, 1).reshape(
-                    batch_size * beam_size, -1)
+                        batch_size * beam_size, encoded.size(1),
+                        encoded.size(2))
+                input_mask = input_mask.unsqueeze(1).repeat(
+                    1, beam_size, 1).reshape(batch_size * beam_size, -1)
 
             # in the first iteration, beam size is 1, in the later ones,
             # it is the real beam size
@@ -265,8 +267,7 @@ def main():
         device=device)
 
     nll = nn.CrossEntropyLoss().to(device)
-    optimizer = optim.Adam(
-            model.parameters(), lr=args.learning_rate)
+    optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
 
     step = 0
     best_wer = 1e9
@@ -291,7 +292,7 @@ def main():
             loss.backward()
 
             if step % 50 == 49:
-                logging.info(f"step: {step}, train loss = {loss:.3g}")
+                logging.info("step: %d, train loss = %.3g", step, loss)
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
             optimizer.zero_grad()
@@ -331,15 +332,16 @@ def main():
                         if j == 0:
                             for k in range(10):
                                 logging.info("")
-                                logging.info(
-                                    f"'{src_string[k]}' -> "
-                                    f"'{hypotheses[k]}' ({tgt_string[k]})")
+                                logging.info("'%s' -> '%s' (%s)",
+                                             src_string[k], hypotheses[k],
+                                             tgt_string[k])
 
                 logging.info("")
                 wer = 1 - sum(
                     float(gt == hyp) for gt, hyp
                     in zip(ground_truth, all_hypotheses)) / len(ground_truth)
-                cer = char_error_rate(all_hypotheses, ground_truth, tokenized=args.tgt_tokenized)
+                cer = char_error_rate(
+                    all_hypotheses, ground_truth, tokenized=args.tgt_tokenized)
 
                 stalled += 1
                 if wer < best_wer:
@@ -351,12 +353,12 @@ def main():
                     best_cer_step = step
                     stalled = 0
 
-                logging.info(f"WER: {wer:.3g}   (best {best_wer:.3g}, "
-                      f"step {best_wer_step})")
-                logging.info(f"CER: {cer:.3g}   (best {best_cer:.3g}, "
-                      f"step {best_cer_step})")
+                logging.info("WER: %.3g   (best %.3g, step %d)",
+                             wer, best_wer, best_wer_step)
+                logging.info("CER: %.3g   (best %.3g, step %d)",
+                             cer, best_cer, best_cer_step)
                 if stalled > 0:
-                    logging.info(f"Stalled {stalled} times.")
+                    logging.info("Stalled %d times.", stalled)
                 else:
                     torch.save(model, model_path)
                 logging.info("")
@@ -398,11 +400,11 @@ def main():
     wer = 1 - sum(
         float(gt == hyp) for gt, hyp
         in zip(ground_truth, all_hypotheses)) / len(ground_truth)
-    logging.info(f"WER: {wer:.3g}")
+    logging.info("WER: %.3g", wer)
 
     cer = char_error_rate(
         all_hypotheses, ground_truth, tokenized=args.tgt_tokenized)
-    logging.info(f"CER: {cer:.3g}")
+    logging.info("CER: %.3g", cer)
     logging.info("")
 
 

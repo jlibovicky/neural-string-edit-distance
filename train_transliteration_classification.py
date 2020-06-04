@@ -12,10 +12,8 @@ import logging
 import os
 
 import numpy as np
-from tensorboardX import SummaryWriter
 import torch
 from torch import nn, optim
-from torch.functional import F
 from torchtext import data
 
 from experiment import experiment_logging, get_timestamp, save_vocab
@@ -38,11 +36,12 @@ def main():
     parser.add_argument("--epochs", default=10, type=int)
     parser.add_argument("--interpretation-loss", default=None, type=float)
     parser.add_argument("--src-tokenized", default=False, action="store_true",
-                        help="If true, source side are space separated tokens.")
+                        help="If true, source side is space-separated.")
     parser.add_argument("--tgt-tokenized", default=False, action="store_true",
-                        help="If true, target side are space separated tokens.")
+                        help="If true, target side are space-separated.")
     parser.add_argument("--patience", default=20, type=int,
-                        help="Number of validations witout improvement before finishing.")
+                        help="Number of no-improvement validations before "
+                             "early finishing.")
     parser.add_argument("--learning-rate", default=1e-4, type=float)
     args = parser.parse_args()
 
@@ -59,7 +58,7 @@ def main():
     experiment_dir = experiment_logging(
         f"edit_class_{experiment_params}_{get_timestamp()}", args)
     model_path = os.path.join(experiment_dir, "model.pt")
-    tb_writer = SummaryWriter(experiment_dir)
+    # tb_writer = SummaryWriter(experiment_dir)
 
     ar_text_field = data.Field(
         tokenize=(lambda s: s.split()) if args.src_tokenized else list,
@@ -74,6 +73,10 @@ def main():
         en_text_field = data.Field(
             tokenize=(lambda s: s.split()) if args.tgt_tokenized else list,
             init_token="<s>", eos_token="</s>", batch_first=True)
+    save_vocab(
+        ar_text_field.vocab.itos, os.path.join(experiment_dir, "src_vocab"))
+    save_vocab(
+        en_text_field.vocab.itos, os.path.join(experiment_dir, "tgt_vocab"))
     labels_field = data.Field(sequential=False)
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -113,7 +116,7 @@ def main():
     for _ in range(args.epochs):
         if stalled > args.patience:
             break
-        for i, train_batch in enumerate(train_iter):
+        for train_batch in train_iter:
             if stalled > args.patience:
                 break
             step += 1
@@ -147,16 +150,17 @@ def main():
 
             distortion_loss = 0
             if args.interpretation_loss is not None:
-                distortion_loss = (action_mask * distorted_probs).sum() / action_mask.sum()
+                distortion_loss = (
+                    (action_mask * distorted_probs).sum() / action_mask.sum())
                 loss += args.interpretation_loss * distortion_loss
 
             loss.backward()
 
-            logging.info(f"step: {step}, train loss = {loss:.3g} "
-                         f"(positive: {pos_loss:.3g}, "
-                         f"negative: {neg_loss:.3g}, "
-                         f"BCE: {bce_loss:.3g}, "
-                         f"distortion: {distortion_loss:.3g})")
+            logging.info(
+                "step: %d, train loss = %.3g (positive: %.3g, negative: %.3g, "
+                "BCE: %.3g, " "distortion: %.3g)",
+                step, loss, pos_loss, neg_loss, bce_loss, distortion_loss)
+
             optimizer.step()
             optimizer.zero_grad()
 
@@ -182,16 +186,19 @@ def main():
 
                     true_positive = np.sum(true_scores > boundary)
                     false_positive = np.sum(false_scores > boundary)
-                    precision = true_positive / (true_positive + false_positive)
+                    precision = (
+                        true_positive / (true_positive + false_positive))
                     recall = true_positive / len(true_scores)
                     f_score = 2 * precision * recall / (precision + recall)
 
                     logging.info("")
-                    logging.info(f"neural true  scores: {pos_mean:.3f} +/- {np.std(true_scores):.3f}")
-                    logging.info(f"neural false scores: {neg_mean:.3f} +/- {np.std(false_scores):.3f}")
-                    logging.info(f"Precision: {precision:.3f}")
-                    logging.info(f"Recall: {recall:.3f}")
-                    logging.info(f"F1-score: {f_score:.3f}")
+                    logging.info("neural true  scores: %.3f +/- %.3f",
+                                 pos_mean, np.std(true_scores))
+                    logging.info("neural false scores: %.3f +/- %.3f",
+                                 neg_mean, np.std(false_scores))
+                    logging.info("Precision: %.3f", precision)
+                    logging.info("Recall: %.3f", recall)
+                    logging.info("F1-score: %.3f", f_score)
 
                     if f_score > best_f_score:
                         torch.save(model, model_path)
@@ -202,8 +209,8 @@ def main():
                         stalled += 1
 
                     if stalled > 0:
-                        logging.info(
-                            f"Stalled {stalled} times (best F score {best_f_score})")
+                        logging.info("Stalled %d times (best F score %.3f)",
+                                     stalled, best_f_score)
 
                     logging.info("")
                 model.train()
@@ -235,11 +242,13 @@ def main():
         f_score = 2 * precision * recall / (precision + recall)
 
         logging.info("")
-        logging.info(f"neural true  scores: {pos_mean:.3f} +/- {np.std(true_scores):.3f}")
-        logging.info(f"neural false scores: {neg_mean:.3f} +/- {np.std(false_scores):.3f}")
-        logging.info(f"Precision: {precision:.3f}")
-        logging.info(f"Recall: {recall:.3f}")
-        logging.info(f"F1-score: {f_score:.3f}")
+        logging.info("neural true  scores: %.3f +/- %.3f",
+                     pos_mean, np.std(true_scores))
+        logging.info("neural false scores: %.3f +/- %.3f",
+                     neg_mean, np.std(false_scores))
+        logging.info("Precision: %.3f", precision)
+        logging.info("Recall: %.3f", recall)
+        logging.info("F1-score: %.3f", f_score)
 
 
 if __name__ == "__main__":
