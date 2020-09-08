@@ -504,16 +504,17 @@ class NeuralEditDistBase(EditDistBase):
         v = en_len - 1
         while t > 0 or v > 0:
             if actions[t, v] == 1:
-                operations.append(("delete", ar_sent[0, t - 1].cpu().numpy()))
+                operations.append(("delete", ar_sent[0, t - 1].cpu().numpy(), t - 1))
                 t -= 1
             elif actions[t, v] == 0:
-                operations.append(("insert", en_sent[0, v].cpu().numpy()))
+                operations.append(("insert", en_sent[0, v].cpu().numpy(), v))
                 v -= 1
             elif actions[t, v] == 2:
                 operations.append(
                     ("subs",
                      (ar_sent[0, t - 1].cpu().numpy(),
-                      en_sent[0, v].cpu().numpy())))
+                      en_sent[0, v].cpu().numpy()),
+                     (t - 1, v)))
                 v -= 1
                 t -= 1
         operations.reverse()

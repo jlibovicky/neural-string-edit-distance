@@ -16,6 +16,16 @@ if [ ! -e eflomal ]; then
     cd ..
 fi
 
+if [ ! -e fast_align ]; then
+    git clone https://github.com/clab/fast_align
+    cd fast_align
+    mkdir build
+    cd build
+    cmake ..
+    make
+    cd ../..
+fi
+
 set -ex
 
 for DATA in cmudict transliteration ielex_stat; do
@@ -26,9 +36,10 @@ for DATA in cmudict transliteration ielex_stat; do
     done > ${DATA}.in
     eflomal/align.py --model 3 -i ${DATA}.in -f ${DATA}.fw -r ${DATA}.bw
 
-    ./intersect.py ${DATA}.fw ${DATA}.bw > ${DATA}.align
+    fast_align/build/atools -c grow-diag-final-and -i ${DATA}.fw -j ${DATA}.bw > ${DATA}.align
 
     tail -n $(wc -l < ../data/${DATA}/test.txt) ${DATA}.align > ${DATA}.align.test
     tail -n $(( `wc -l < ../data/${DATA}/eval.txt` + `wc -l < ../data/${DATA}/test.txt` )) ${DATA}.align | \
         head -n $(wc -l < ../data/${DATA}/eval.txt) > ${DATA}.align.eval
+    rm ${DATA}.{fw,bw}
 done

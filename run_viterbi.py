@@ -34,8 +34,10 @@ def main():
                         default=sys.stdin)
     parser.add_argument("--src-tokenized", default=False, action="store_true")
     parser.add_argument("--tgt-tokenized", default=False, action="store_true")
-    parser.add_argument("--output-format", default="nice",
-                        choices=["nice", "tsv"])
+    parser.add_argument(
+        "--output-format", default="nice", choices=["nice", "tsv", "alignment"],
+        help="Nice for command line, tsv for processing, alignment=subtitutitons "
+             "in word alignment format.")
     args = parser.parse_args()
 
     model = torch.load(args.model)
@@ -62,11 +64,20 @@ def main():
             torch.tensor([string_1_idx]).cuda(),
             torch.tensor([string_2_idx]).cuda())
 
+        if args.output_format == "alignment":
+            alignment = []
+            for operation, _, idx in edit_ops[1:-1]:
+                if operation == "subs":
+                    src_id, tgt_id = idx
+                    alignment.append(f"{src_id + 1}-{tgt_id + 1}")
+            print(" ".join(alignment))
+            continue
+
         if args.output_format == "nice":
             print(f"{string_1} ⇨ {string_2}")
 
         readable_ops = []
-        for operation, chars in edit_ops[1:-1]:
+        for operation, chars, _ in edit_ops[1:-1]:
             if operation == "delete":
                 readable_ops.append(f"-{src_vocab[chars]}")
             if operation == "insert":

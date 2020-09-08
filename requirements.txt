@@ -1,6 +1,6 @@
 torch
 torchtext
-transformers
+transformers==2.5.1
 editdistance
 termcolor
 tensorboardX
