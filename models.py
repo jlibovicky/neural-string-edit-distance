@@ -16,7 +16,7 @@ class EditDistBase(nn.Module):
     """Base class used both for statistical and neural model."""
     def __init__(self, ar_vocab, en_vocab, start_symbol,
                  end_symbol, pad_symbol, table_type="full", extra_classes=0):
-        super(EditDistBase, self).__init__()
+        super().__init__()
 
         self.ar_vocab = ar_vocab
         self.en_vocab = en_vocab
@@ -65,9 +65,9 @@ class EditDistBase(nn.Module):
     def _insertion_id(self, en_char):
         if self.table_type == "full":
             return self.ar_symbol_count + en_char
-        elif self.table_type == "tiny":
+        if self.table_type == "tiny":
             return 1
-        elif self.table_type == "vocab":
+        if self.table_type == "vocab":
             return 1 + en_char
         raise RuntimeError("Unknown table type.")
 
@@ -77,9 +77,9 @@ class EditDistBase(nn.Module):
                        self.en_symbol_count * ar_char + en_char)
             assert subs_id < self.n_target_classes
             return subs_id
-        elif self.table_type == "tiny":
+        if self.table_type == "tiny":
             return 2
-        elif self.table_type == "vocab":
+        if self.table_type == "vocab":
             return 1 + self.en_symbol_count + en_char
         raise RuntimeError("Unknown table type.")
 
@@ -116,7 +116,7 @@ class NeuralEditDistBase(EditDistBase):
                  hidden_dim=32, hidden_layers=2, attention_heads=4,
                  model_type="transformer",
                  start_symbol="<s>", end_symbol="</s>", pad_symbol="<pad>"):
-        super(NeuralEditDistBase, self).__init__(
+        super().__init__(
             ar_vocab, en_vocab, start_symbol, end_symbol, pad_symbol,
             table_type=table_type, extra_classes=extra_classes)
 
@@ -169,13 +169,13 @@ class NeuralEditDistBase(EditDistBase):
     def _encoder_for_vocab(self, vocab, directed=False):
         if self.model_type == "transformer":
             return self._transformer_for_vocab(vocab, directed)
-        elif self.model_type == "rnn":
+        if self.model_type == "rnn":
             return self._rnn_for_vocab(vocab, directed)
-        elif self.model_type == "bert":
+        if self.model_type == "bert":
             return BertModel.from_pretrained("bert-base-cased")
-        elif self.model_type == "embeddings":
+        if self.model_type == "embeddings":
             return self._cnn_for_vocab(vocab, directed, hidden=False)
-        elif self.model_type == "cnn":
+        if self.model_type == "cnn":
             return self._cnn_for_vocab(vocab, directed, hidden=True)
         raise ValueError(f"Uknown model type {self.model_type}.")
 
@@ -198,11 +198,10 @@ class NeuralEditDistBase(EditDistBase):
             return RNNEncoder(
                 vocab, self.hidden_dim,
                 self.hidden_dim, self.hidden_layers, dropout=0.1)
-        else:
-            return RNNDecoder(
-                vocab, self.hidden_dim,
-                self.hidden_dim, self.hidden_layers, self.attention_heads,
-                output_proj=False, dropout=0.1)
+        return RNNDecoder(
+            vocab, self.hidden_dim,
+            self.hidden_dim, self.hidden_layers, self.attention_heads,
+            output_proj=False, dropout=0.1)
 
     def _cnn_for_vocab(self, vocab, directed=False, hidden=True, dropout=0.1):
         layers = self.hidden_layers if hidden else 0
@@ -213,13 +212,12 @@ class NeuralEditDistBase(EditDistBase):
                 self.hidden_dim,
                 window=self.window,
                 layers=layers, dropout=dropout)
-        else:
-            return CNNDecoder(
-                vocab, self.hidden_dim,
-                self.hidden_dim, layers=layers,
-                window=self.window,
-                attention_heads=self.attention_heads,
-                output_proj=False, dropout=dropout)
+        return CNNDecoder(
+            vocab, self.hidden_dim,
+            self.hidden_dim, layers=layers,
+            window=self.window,
+            attention_heads=self.attention_heads,
+            output_proj=False, dropout=dropout)
 
     def _encode_ar(self, inputs, mask):
         return self.ar_encoder(inputs, attention_mask=mask)[0]
@@ -504,10 +502,12 @@ class NeuralEditDistBase(EditDistBase):
         v = en_len - 1
         while t > 0 or v > 0:
             if actions[t, v] == 1:
-                operations.append(("delete", ar_sent[0, t - 1].cpu().numpy(), t - 1))
+                operations.append(
+                    ("delete", ar_sent[0, t - 1].cpu().numpy(), t - 1))
                 t -= 1
             elif actions[t, v] == 0:
-                operations.append(("insert", en_sent[0, v].cpu().numpy(), v))
+                operations.append(
+                    ("insert", en_sent[0, v].cpu().numpy(), v))
                 v -= 1
             elif actions[t, v] == 2:
                 operations.append(
@@ -539,7 +539,7 @@ class EditDistNeuralModelConcurrent(NeuralEditDistBase):
                  share_encoders=False,
                  model_type="transformer",
                  start_symbol="<s>", end_symbol="</s>", pad_symbol="<pad>"):
-        super(EditDistNeuralModelConcurrent, self).__init__(
+        super().__init__(
             ar_vocab, en_vocab, device, directed,
             encoder_decoder_attention=False,
             share_encoders=share_encoders,
@@ -591,7 +591,7 @@ class EditDistNeuralModelProgressive(NeuralEditDistBase):
                  window=3,
                  encoder_decoder_attention=True, model_type="transformer",
                  start_symbol="<s>", end_symbol="</s>", pad_symbol="<pad>"):
-        super(EditDistNeuralModelProgressive, self).__init__(
+        super().__init__(
             ar_vocab, en_vocab, device, directed, table_type="vocab",
             model_type=model_type,
             encoder_decoder_attention=encoder_decoder_attention,
@@ -726,7 +726,7 @@ class EditDistNeuralModelProgressive(NeuralEditDistBase):
         b_range = torch.arange(batch_size)
 
         en_sent = torch.tensor([[self.en_bos]] * batch_size).to(self.device)
-        (ar_len, en_len, feature_table,
+        (ar_len, _, feature_table,
          action_scores, _, _) = self._action_scores(ar_sent, en_sent)
         log_ar_mask = torch.where(
             ar_sent == self.ar_pad,
@@ -758,12 +758,14 @@ class EditDistNeuralModelProgressive(NeuralEditDistBase):
 
             en_sent = torch.cat((en_sent, next_symbol), dim=1)
 
-            ar_len, en_len, feature_table, action_scores, _, _ = self._action_scores(
+            (ar_len, en_len, feature_table,
+                    action_scores, _, _) = self._action_scores(
                 ar_sent, en_sent)
             finished += next_symbol.squeeze(1) == self.en_eos
 
             alpha = self. _update_alpha_with_new_row(
-                batch_size, b_range, v, alpha, action_scores, ar_sent, en_sent, ar_len)
+                batch_size, b_range, v, alpha, action_scores,
+                ar_sent, en_sent, ar_len)
 
             # expand the target sequence
             if torch.all(finished):
@@ -784,7 +786,7 @@ class EditDistNeuralModelProgressive(NeuralEditDistBase):
         # special case, v = 0 - intitialize first row of alpha table
         decoded = torch.full(
             (batch_size, 1, 1), self.en_bos, dtype=torch.long).to(self.device)
-        (ar_len, en_len, feature_table,
+        (ar_len, _, feature_table,
          action_scores, _, _) = self._action_scores(
             ar_sent, decoded.squeeze(1))
 
@@ -795,7 +797,8 @@ class EditDistNeuralModelProgressive(NeuralEditDistBase):
                 continue
             deletion_id = self._deletion_id(ar_char)
             alpha[:, 0, t, 0] = (
-                action_scores[b_range, t, 0, deletion_id] + alpha[:, 0, t - 1, 0])
+                action_scores[b_range, t, 0, deletion_id]
+                + alpha[:, 0, t - 1, 0])
 
         # INITIALIZE THE BEAM SEARCH
         cur_len = 1
@@ -860,7 +863,7 @@ class EditDistNeuralModelProgressive(NeuralEditDistBase):
             # prepare feature and alpha for the next step
             flat_decoded = decoded.reshape(-1, cur_len + 1)
             flat_finished = finished.reshape(-1, cur_len + 1)
-            (ar_len, en_len, feature_table,
+            (ar_len, _, feature_table,
                 action_scores, _, _) = self._action_scores(
                     ar_sent, flat_decoded)
             flat_alpha = self. _update_alpha_with_new_row(
@@ -873,203 +876,3 @@ class EditDistNeuralModelProgressive(NeuralEditDistBase):
             cur_len += 1
 
         return decoded[:, 0]
-
-    @torch.no_grad()
-    def _viterbi_with_actions(self, ar_sent, en_sent, actions_scores):
-        ar_len, en_len = ar_sent.size(1), en_sent.size(1)
-        action_count = torch.zeros((ar_len, en_len))
-        alpha = torch.zeros((ar_len, en_len)) + MINF
-
-        alpha = torch.full((batch_size, ar_len, en_len), MINF)
-        alpha[:, 0, 0] = 0
-        for t, ar_char in enumerate(ar_sent.transpose(0, 1)):
-            for v, en_char in enumerate(en_sent.transpose(0, 1)):
-                if t == 0 and v == 0:
-                    continue
-
-                deletion_id = self._deletion_id(ar_char)
-                insertion_id = self._insertion_id(en_char)
-                subsitute_id = self._substitute_id(ar_char, en_char)
-
-                possible_actions = []
-
-                if v >= 1:
-                    possible_actions.append(
-                        (action_scores[t, v, insertion_id] + alpha[t, v - 1],
-                         action_count[t, v - 1] + 1))
-                if t >= 1:
-                    possible_actions.append(
-                        (action_scores[t, v, deletion_id] + alpha[t - 1, v],
-                         action_count[t - 1, v] + 1))
-                if v >= 1 and t >= 1:
-                    possible_actions.append(
-                        (action_scores[t, v, subsitute_id] + alpha[t - 1, v - 1],
-                         action_count[t - 1, v - 1] + 1))
-
-                best_action_cost, best_action_count = max(
-                    possible_actions, key=lambda x: x[0] / x[1])
-
-                alpha[t, v] = best_action_cost
-                action_count[t, v] = best_action_count
-
-        return torch.exp(alpha[-1, -1] / action_count[-1, -1])
-
-
-class EditDistStatModel(EditDistBase):
-    """The original statistical algorithm by Ristad and Yanilos.
-
-    This is a reimplemntation of the original learnable edit distance algorithm
-    in PyTorch using the same interface as the neural models.
-    """
-    def __init__(self, ar_vocab, en_vocab, start_symbol="<s>",
-                 end_symbol="</s>", pad_symbol="<pad>",
-                 identitiy_initialize=True):
-        super(EditDistStatModel, self).__init__(
-            ar_vocab, en_vocab, start_symbol, end_symbol, pad_symbol)
-
-        weights = torch.tensor([
-            1 / self.n_target_classes for _ in range(self.n_target_classes)])
-
-        if identitiy_initialize:
-            idenity_weight = [0. for _ in range(self.n_target_classes)]
-            id_count = 0
-            for idx, symbol in enumerate(self.ar_vocab.itos):
-                if symbol in self.en_vocab.stoi:
-                    idenity_weight[self._substitute_id(
-                        idx, self.en_vocab[symbol])] = 1.
-                    id_count += 1
-            idenity_weight_tensor = torch.tensor(idenity_weight) / id_count
-            weights = (weights + idenity_weight_tensor) / 2
-
-        self.weights = torch.log(weights)
-
-    def forward(self, ar_sent, en_sent):
-        ar_len, en_len = ar_sent.size(1), en_sent.size(1)
-        table_shape = ((ar_len, en_len, self.n_target_classes))
-
-        plausible_deletions = torch.zeros(table_shape) + MINF
-        plausible_insertions = torch.zeros(table_shape) + MINF
-        plausible_substitutions = torch.zeros(table_shape) + MINF
-
-        alpha = torch.zeros((ar_len, en_len)) + MINF
-        alpha[0, 0] = 0
-        for t, ar_char in enumerate(ar_sent[0]):
-            for v, en_char in enumerate(en_sent[0]):
-                if t == 0 and v == 0:
-                    continue
-
-                deletion_id = self._deletion_id(ar_char)
-                insertion_id = self._insertion_id(en_char)
-                subsitute_id = self._substitute_id(ar_char, en_char)
-
-                plausible_deletions[t, v, deletion_id] = 0
-                plausible_insertions[t, v, insertion_id] = 0
-                plausible_substitutions[t, v, subsitute_id] = 0
-
-                to_sum = [alpha[t, v]]
-                if v >= 1:
-                    to_sum.append(self.weights[insertion_id] + alpha[t, v - 1])
-                if t >= 1:
-                    to_sum.append(self.weights[deletion_id] + alpha[t - 1, v])
-                if v >= 1 and t >= 1:
-                    to_sum.append(
-                        self.weights[subsitute_id] + alpha[t - 1, v - 1])
-
-                alpha[t, v] = torch.logsumexp(torch.tensor(to_sum), dim=0)
-
-        beta = torch.zeros((ar_len, en_len)) + MINF
-        beta[-1, -1] = 0.0
-
-        for t in reversed(range(ar_len)):
-            for v in reversed(range(en_len)):
-
-                to_sum = [beta[t, v]]
-                if v < en_len - 1:
-                    insertion_id = self._insertion_id(en_sent[0, v + 1])
-                    to_sum.append(
-                        self.weights[insertion_id] + beta[t, v + 1])
-                if t < ar_len - 1:
-                    deletion_id = self._deletion_id(ar_sent[0, t + 1])
-                    to_sum.append(
-                        self.weights[deletion_id] + beta[t + 1, v])
-                if v < en_len - 1 and t < ar_len - 1:
-                    subsitute_id = self._substitute_id(
-                        ar_sent[0, t + 1], en_sent[0, v + 1])
-                    to_sum.append(
-                        self.weights[subsitute_id] + beta[t + 1, v + 1])
-                beta[t, v] = torch.logsumexp(torch.tensor(to_sum), dim=0)
-
-        expand_weights = self.weights.unsqueeze(0).unsqueeze(0)
-        # deletion expectation
-        expected_deletions = (
-            alpha[:-1, :].unsqueeze(2) +
-            expand_weights + plausible_deletions[1:, :] +
-            beta[1:, :].unsqueeze(2))
-        # insertoin expectation
-        expected_insertions = (
-            alpha[:, :-1].unsqueeze(2) +
-            expand_weights + plausible_insertions[:, 1:] +
-            beta[:, 1:].unsqueeze(2))
-        # substitution expectation
-        expected_substitutions = (
-            alpha[:-1, :-1].unsqueeze(2) +
-            expand_weights + plausible_substitutions[1:, 1:] +
-            beta[1:, 1:].unsqueeze(2))
-
-        all_counts = torch.cat([
-            expected_deletions.reshape((-1, self.n_target_classes)),
-            expected_insertions.reshape((-1, self.n_target_classes)),
-            expected_substitutions.reshape((-1, self.n_target_classes))],
-            dim=0)
-
-        expected_counts = all_counts.logsumexp(0)
-        return expected_counts
-
-    def viterbi(self, ar_sent, en_sent):
-        ar_len, en_len = ar_sent.size(1), en_sent.size(1)
-
-        action_count = torch.zeros((ar_len, en_len))
-        alpha = torch.zeros((ar_len, en_len)) - MINF
-        alpha[0, 0] = 0
-        for t, ar_char in enumerate(ar_sent[0]):
-            for v, en_char in enumerate(en_sent[0]):
-                if t == 0 and v == 0:
-                    continue
-
-                deletion_id = self._deletion_id(ar_char)
-                insertion_id = self._insertion_id(en_char)
-                subsitute_id = self._substitute_id(ar_char, en_char)
-
-                possible_actions = []
-
-                if v >= 1:
-                    possible_actions.append(
-                        (self.weights[insertion_id] + alpha[t, v - 1],
-                         action_count[t, v - 1] + 1))
-                if t >= 1:
-                    possible_actions.append(
-                        (self.weights[deletion_id] + alpha[t - 1, v],
-                         action_count[t - 1, v] + 1))
-                if v >= 1 and t >= 1:
-                    possible_actions.append(
-                        (self.weights[subsitute_id] + alpha[t - 1, v - 1],
-                         action_count[t - 1, v - 1] + 1))
-
-                best_action_cost, best_action_count = max(
-                    possible_actions, key=lambda x: x[0] / x[1])
-
-                alpha[t, v] = best_action_cost
-                action_count[t, v] = best_action_count
-
-        return torch.exp(alpha[-1, -1] / action_count[-1, -1])
-
-    def maximize_expectation(self, expectations):
-        epsilon = torch.log(torch.tensor(1e-16)) + \
-            torch.zeros_like(self.weights)
-        expecation_sum = torch.stack([epsilon] + expectations).logsumexp(0)
-        distribution = (
-            expecation_sum - expecation_sum.logsumexp(0, keepdim=True))
-
-        self.weights = torch.stack([
-            torch.log(torch.tensor(0.9)) + self.weights,
-            torch.log(torch.tensor(0.1)) + distribution]).logsumexp(0)
