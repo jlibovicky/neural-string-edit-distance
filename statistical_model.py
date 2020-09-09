@@ -152,7 +152,8 @@ class EditDistStatModel(EditDistBase):
 
         return torch.exp(alpha[-1, -1] / action_count[-1, -1])
 
-    def maximize_expectation(self, expectations):
+    def maximize_expectation(self, expectations, learning_rate=0.1):
+        assert 0 < learning_rate <= 1.0
         epsilon = torch.log(torch.tensor(1e-16)) + \
             torch.zeros_like(self.weights)
         expecation_sum = torch.stack([epsilon] + expectations).logsumexp(0)
@@ -160,5 +161,5 @@ class EditDistStatModel(EditDistBase):
             expecation_sum - expecation_sum.logsumexp(0, keepdim=True))
 
         self.weights = torch.stack([
-            torch.log(torch.tensor(0.9)) + self.weights,
-            torch.log(torch.tensor(0.1)) + distribution]).logsumexp(0)
+            torch.log(torch.tensor(1 - learning_rate)) + self.weights,
+            torch.log(torch.tensor(learning_rate)) + distribution]).logsumexp(0)
