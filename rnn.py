@@ -123,7 +123,7 @@ class RNNDecoder(nn.Module):
         elif use_attention:
             self.attn = nn.ModuleList([
                 BertSelfAttention(AttConfig(
-                    hidden_size, attention_heads, False, 0.1))
+                    hidden_size, attention_heads, True, 0.1))
                 for _ in range(num_layers)])
 
         self.other_grus = nn.ModuleList([
@@ -153,13 +153,15 @@ class RNNDecoder(nn.Module):
             outputs, batch_first=True)
         outputs = self.rnn_norms[0](self.dropout(outputs))
 
+        attentions = []
         if encoder_hidden_states is not None:
             unsq_enc_att_mask = (
                 encoder_attention_mask.unsqueeze(1).unsqueeze(1))
-            context = self.attn[0](
+            context, att_dist = self.attn[0](
                 outputs, encoder_hidden_states=encoder_hidden_states,
-                encoder_attention_mask=unsq_enc_att_mask)[0]
+                encoder_attention_mask=unsq_enc_att_mask)
             outputs = self.ctx_norms[0](outputs + self.dropout(context))
+            attentions.append((None, att_dist))
 
         for gru, att, rnn_norm, ctx_norm in zip(
                 self.other_grus, self.attn[1:],
@@ -175,12 +177,13 @@ class RNNDecoder(nn.Module):
             if encoder_hidden_states is not None:
                 unsq_enc_att_mask = (
                     encoder_attention_mask.unsqueeze(1).unsqueeze(1))
-                context = att(
+                context, att_dist = att(
                     outputs, encoder_hidden_states=encoder_hidden_states,
-                    encoder_attention_mask=unsq_enc_att_mask)[0]
+                    encoder_attention_mask=unsq_enc_att_mask)
                 outputs = ctx_norm(outputs + self.dropout(context))
+                attentions.append((None, att_dist))
 
         if self.output_proj is not None:
             outputs = self.output_proj(outputs)
 
-        return outputs, None
+        return outputs, None, attentions

@@ -44,27 +44,31 @@ class Seq2SeqModel(nn.Module):
 
         self.device = device
 
-
     def forward(self, src_batch, tgt_batch):
         encoder_mask = src_batch != self.src_pad_token_id
         encoder_states = self.encoder(
             src_batch,
             attention_mask=encoder_mask)[0]
-        decoder_states = self.decoder(
+        decoder_output = self.decoder(
             tgt_batch[:, :-1],
             attention_mask=tgt_batch[:, :-1] != self.tgt_pad_token_id,
             encoder_hidden_states=encoder_states,
-            encoder_attention_mask=encoder_mask)[0]
+            encoder_attention_mask=encoder_mask)#[0]
+        decoder_states = decoder_output[0]
         logits = torch.matmul(
             decoder_states,
             self.transposed_embeddings)
-        return logits
 
+        attentions = sum(
+            att[1].mean(1) for att in decoder_output[2]) / len(
+                decoder_output[2])
+
+        return logits, attentions
 
     @torch.no_grad()
     def greedy_decode(self, src_batch, max_len=100):
         input_mask = src_batch != self.src_pad_token_id
-        encoded, _ = self.encoder(src_batch, attention_mask=input_mask)
+        encoded = self.encoder(src_batch, attention_mask=input_mask)[0]
         batch_size = encoded.size(0)
 
         finished = [
@@ -74,11 +78,11 @@ class Seq2SeqModel(nn.Module):
 
         for _ in range(max_len):
             decoder_input = torch.stack(decoded, dim=1)
-            decoder_states, _ = self.decoder(
+            decoder_states = self.decoder(
                 decoder_input,
                 attention_mask=~torch.stack(finished, dim=1),
                 encoder_hidden_states=encoded,
-                encoder_attention_mask=input_mask)
+                encoder_attention_mask=input_mask)[0]
             logits = torch.matmul(
                 decoder_states,
                 self.transposed_embeddings)
@@ -97,7 +101,7 @@ class Seq2SeqModel(nn.Module):
     @torch.no_grad()
     def beam_search(self, src_batch, beam_size=10, max_len=100):
         input_mask = src_batch != self.src_pad_token_id
-        encoded, _ = self.encoder(src_batch, attention_mask=input_mask)
+        encoded = self.encoder(src_batch, attention_mask=input_mask)[0]
         batch_size = encoded.size(0)
 
         cur_len = 1
@@ -118,9 +122,9 @@ class Seq2SeqModel(nn.Module):
                 input_ids=flat_decoded,
                 attention_mask=~flat_finished,
                 encoder_hidden_states=encoded,
-                encoder_attention_mask=input_mask)
+                encoder_attention_mask=input_mask)[0]
             next_token_logprobs = F.log_softmax(torch.matmul(
-                outputs[0][:, -1, :],
+                outputs[:, -1, :],
                 self.transposed_embeddings), dim=1)
             vocab_size = next_token_logprobs.size(1)
 
@@ -241,7 +245,8 @@ def main():
             intermediate_size=2 * args.hidden_size,
             hidden_act='relu',
             hidden_dropout_prob=0.1,
-            attention_probs_dropout_prob=0.1)
+            attention_probs_dropout_prob=0.1,
+            output_attentions=True)
         encoder = BertModel(transformer_config).to(device)
 
         transformer_config.is_decoder = True
@@ -284,7 +289,7 @@ def main():
                 break
             step += 1
 
-            logits = model(train_batch.ar, train_batch.en)
+            logits = model(train_batch.ar, train_batch.en)[0]
 
             loss = nll(
                 logits.reshape([-1, len(en_text_field.vocab)]),
