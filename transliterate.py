@@ -26,7 +26,7 @@ def main():
     parser.add_argument("--tgt-tokenized", default=False, action="store_true")
     parser.add_argument(
         "--decoding", default="greedy",
-        choices=["greedy", "beam_search", "operations"])
+        choices=["greedy", "beam_search", "operations", "operations_beam"])
     parser.add_argument("--evaluate", default=False, action="store_true")
     parser.add_argument("--beam-size", type=int, default=10)
     args = parser.parse_args()
@@ -63,6 +63,8 @@ def main():
             output = model.beam_search(string_1_idx, args.beam_size)
         elif args.decoding == "operations":
             output = model.operation_decoding(string_1_idx) #, args.beam_size)
+        elif args.decoding == "operations_beam":
+            output = model.operation_beam_search(string_1_idx, args.beam_size)
         else:
             raise ValueError(f"Unknown type of decoding: {args.decoding}")
 

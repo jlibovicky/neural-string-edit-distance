@@ -1,5 +1,7 @@
 """Neural string edit distance."""
 
+import heapq
+
 import torch
 from torch import nn
 from torch.functional import F
@@ -818,9 +820,11 @@ class EditDistNeuralModelProgressive(NeuralEditDistBase):
             candidate_scores = (
                 scores.unsqueeze(2) +
                 next_symb_scores.reshape(batch_size, current_beam, -1))
+            normed_scores = (
+                candidate_scores / ((1 - finished.float()).sum(2, keepdim=True) + 1))
 
             # reshape for beam members and get top k
-            best_scores, best_indices = candidate_scores.reshape(
+            best_scores, best_indices = normed_scores.reshape(
                 batch_size, -1).topk(beam_size, dim=-1)
             next_symbol_ids = best_indices % self.en_symbol_count
             hypothesis_ids = best_indices // self.en_symbol_count
@@ -849,7 +853,9 @@ class EditDistNeuralModelProgressive(NeuralEditDistBase):
             flat_alpha = flat_alpha.index_select(0, global_best_indices)
 
             # re-order scores
-            scores = best_scores
+            scores = candidate_scores.reshape(
+                batch_size, -1).gather(-1, best_indices)
+
             # TODO need to be done better fi we want lenght normalization
 
             # tile encoder after first step
@@ -895,11 +901,11 @@ class EditDistNeuralModelProgressive(NeuralEditDistBase):
             raise ValueError("Only works with batch size 1.")
 
         en_sent = torch.tensor([[self.en_bos]]).to(self.device)
-        (ar_len, _, feature_table,
-         action_scores, _, _) = self._action_scores(ar_sent, en_sent)
+        (ar_len, _, feature_table, _, _, _) = self._action_scores(
+            ar_sent, en_sent)
 
         v = 0
-        t = 1
+        t = 0
         for _ in range(1, 2 * ar_sent.size(1)):
             state = feature_table[0, t, v]
 
@@ -913,8 +919,8 @@ class EditDistNeuralModelProgressive(NeuralEditDistBase):
             else:
                 subs_scores = self.substitution_proj(state)
 
-            all_scores = F.log_softmax(torch.cat([
-                deletion_score, insertion_scores, subs_scores], dim=0))
+            all_scores = torch.cat([
+                deletion_score, insertion_scores, subs_scores], dim=0)
             best_operation = all_scores.argmax()
 
             # Delete source symbol and move in the source sequence
@@ -932,9 +938,84 @@ class EditDistNeuralModelProgressive(NeuralEditDistBase):
             en_sent = torch.cat((
                 en_sent, next_symbol.unsqueeze(0).unsqueeze(0)), dim=1)
 
-            (ar_len, _, feature_table,
-                    action_scores, _, _) = self._action_scores(
+            (ar_len, _, feature_table, _, _, _) = self._action_scores(
                 ar_sent, en_sent)
             if next_symbol == self.en_eos:
                 break
         return en_sent
+
+    @torch.no_grad()
+    def operation_beam_search(self, ar_sent, beam_size):
+        """Decode sequeence by operation sampling.
+
+        Instead of sampling from symbol distributions, it samples directly
+        operations.
+
+        Args:
+            at_sent: Source sequence.
+
+        Returns:
+            Decoded target string.
+        """
+        if ar_sent.size(0) != 1:
+            raise ValueError("Only works with batch size 1.")
+
+        # State is a tuple: target sequence, t, v, finished, score
+        beam = [(torch.tensor([[self.en_bos]]).to(self.device), 0, 0, False, 0)]
+        next_candidates = []
+
+        def score_fn(hypothesis):
+            _, _, tgt_pos, _, score_sum = hypothesis
+            return score_sum / (tgt_pos + 1)
+
+        for _ in range(1, 2 * ar_sent.size(1)):
+            for en_sent, t, v, finished, score in beam:
+                if finished:
+                    next_candidates.append((en_sent, t, v, finished, score))
+                    continue
+
+                (ar_len, _, feature_table, _, _, _) = self._action_scores(
+                    ar_sent, en_sent)
+                state = feature_table[0, t, v]
+
+                if t >= ar_len - 1:
+                    deletion_score = MINF.unsqueeze(0).to(self.device)
+                else:
+                    deletion_score = self.deletion_logit_proj(state)
+                insertion_scores = self.insertion_proj(state)
+                if t >= ar_len - 1:
+                    subs_scores = torch.full_like(insertion_scores, MINF)
+                else:
+                    subs_scores = self.substitution_proj(state)
+
+                all_scores = F.log_softmax(torch.cat([
+                    deletion_score, insertion_scores, subs_scores], dim=0),
+                    dim=0)
+                best_scores, best_indices = all_scores.topk(2 * beam_size)
+
+                for op_score, op_idx in zip(best_scores, best_indices):
+                    # Delete source symbol and move in the source sequence
+                    if op_idx == 0:
+                        next_candidates.append((
+                            en_sent, t + 1, v, False, score + op_score))
+                        continue
+
+                    # Adding a new symbol => increase target sequnece index
+                    next_symbol = (op_idx - 1) % self.en_symbol_count
+                    new_en_sent = torch.cat((
+                        en_sent, next_symbol.unsqueeze(0).unsqueeze(0)), dim=1)
+
+                    next_candidates.append((
+                        new_en_sent,
+                        t + (op_idx > self.en_symbol_count),
+                        v + 1,
+                        next_symbol == self.en_eos,
+                        score + op_score))
+
+            beam = heapq.nlargest(
+                beam_size, next_candidates, key=score_fn)
+            next_candidates = []
+            if all(hyp[3] for hyp in beam):
+                break
+
+        return max(beam, key=score_fn)[0]
