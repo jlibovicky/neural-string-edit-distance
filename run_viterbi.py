@@ -47,7 +47,8 @@ def main():
     logging.info("Vocabularies loaded.")
 
     for line in args.input:
-        string_1, string_2 = line.strip().split("\t")
+        line_split = line.strip().split("\t")
+        string_1, string_2 = line_split[0], line_split[1]
         string_1_tok = (
             ["<s>"] +
             (string_1.split() if args.src_tokenized else list(string_1)) +
@@ -69,7 +70,7 @@ def main():
             for operation, _, idx in edit_ops[1:-1]:
                 if operation == "subs":
                     src_id, tgt_id = idx
-                    alignment.append(f"{src_id + 1}-{tgt_id + 1}")
+                    alignment.append(f"{src_id}-{tgt_id}")
             print(" ".join(alignment))
             continue
 

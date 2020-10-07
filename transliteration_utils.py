@@ -1,5 +1,18 @@
+from collections import defaultdict
+
 import editdistance
 from torchtext import data
+
+
+def load_vocab(file):
+    vocab = []
+    for token in file:
+        vocab.append(token.strip())
+    file.close()
+    stoi = defaultdict(int)
+    for i, symb in enumerate(vocab):
+        stoi[symb] = i
+    return vocab, stoi
 
 
 def load_transliteration_data(

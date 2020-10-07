@@ -1,9 +1,9 @@
 #!/usr/bin/env python
-# coding: utf-8
 
 """Evaluate alignment."""
 
 import argparse
+import sys
 
 
 def main():
@@ -12,8 +12,8 @@ def main():
         "ground_truth", type=argparse.FileType("r"),
         help="Ground truth alignment.")
     parser.add_argument(
-        "prediction", type=argparse.FileType("r"),
-        help="Predicted alignment.")
+        "prediction", type=argparse.FileType("r"), nargs="?",
+        help="Predicted alignment.", default=sys.stdin)
     args = parser.parse_args()
 
     precisions = []
