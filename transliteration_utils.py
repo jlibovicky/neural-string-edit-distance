@@ -41,9 +41,11 @@ def load_transliteration_data(
     return (ar_text_field, en_text_field, train_iter, val_iter, test_iter)
 
 
-def decode_ids(ids_list, field, tokenized=False):
+def decode_ids(ids_list, vocab, tokenized=False):
+    if not isinstance(vocab, list):
+        vocab = vocab.vocab.itos
     separator = " " if tokenized else ""
-    chars = [field.vocab.itos[i] for i in ids_list]
+    chars = [vocab[i] for i in ids_list]
     if chars[0] == "<s>":
         chars = chars[1:]
     real_chars = []

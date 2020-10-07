@@ -876,3 +876,65 @@ class EditDistNeuralModelProgressive(NeuralEditDistBase):
             cur_len += 1
 
         return decoded[:, 0]
+
+    @torch.no_grad()
+    def operation_decoding(self, ar_sent):
+        """Decode sequeence by operation sampling.
+
+        Instead of sampling from symbol distributions, it samples directly
+        operations.
+
+        Args:
+            at_sent: Source sequence.
+
+        Returns:
+            Decoded target string.
+
+        """
+        if ar_sent.size(0) != 1:
+            raise ValueError("Only works with batch size 1.")
+
+        en_sent = torch.tensor([[self.en_bos]]).to(self.device)
+        (ar_len, _, feature_table,
+         action_scores, _, _) = self._action_scores(ar_sent, en_sent)
+
+        v = 0
+        t = 1
+        for _ in range(1, 2 * ar_sent.size(1)):
+            state = feature_table[0, t, v]
+
+            if t >= ar_len - 1:
+                deletion_score = MINF.unsqueeze(0).to(self.device)
+            else:
+                deletion_score = self.deletion_logit_proj(state)
+            insertion_scores = self.insertion_proj(state)
+            if t >= ar_len - 1:
+                subs_scores = torch.full_like(insertion_scores, MINF)
+            else:
+                subs_scores = self.substitution_proj(state)
+
+            all_scores = F.log_softmax(torch.cat([
+                deletion_score, insertion_scores, subs_scores], dim=0))
+            best_operation = all_scores.argmax()
+
+            # Delete source symbol and move in the source sequence
+            if best_operation == 0:
+                t += 1
+                continue
+
+            # We are adding a new symbol => increase target sequnece index
+            next_symbol = (best_operation - 1) % self.en_symbol_count
+            v += 1
+
+            if best_operation > self.en_symbol_count:
+                t += 1
+
+            en_sent = torch.cat((
+                en_sent, next_symbol.unsqueeze(0).unsqueeze(0)), dim=1)
+
+            (ar_len, _, feature_table,
+                    action_scores, _, _) = self._action_scores(
+                ar_sent, en_sent)
+            if next_symbol == self.en_eos:
+                break
+        return en_sent
