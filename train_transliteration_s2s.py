@@ -191,7 +191,6 @@ def main():
     parser.add_argument("--epochs", default=100, type=int)
     parser.add_argument("--model-type", default='transformer',
                         choices=["transformer", "rnn"])
-    parser.add_argument("--embedding-dim", default=256, type=int)
     parser.add_argument("--hidden-size", default=256, type=int)
     parser.add_argument("--attention-heads", default=4, type=int)
     parser.add_argument("--layers", default=2, type=int)
@@ -207,6 +206,10 @@ def main():
         help="Number of validations witout improvement before finishing.")
     parser.add_argument(
         "--learning-rate", default=1e-4, type=float)
+    parser.add_argument("--validation-frequency", default=50, type=int,
+                        help="Number of steps between validations.")
+    parser.add_argument("--log-directory", default="experiments", type=str,
+                        help="Number of steps between validations.")
     args = parser.parse_args()
 
     experiment_params = (
@@ -219,6 +222,7 @@ def main():
         f"_lr{args.learning_rate}" +
         f"_patence{args.patience}")
     experiment_dir = experiment_logging(
+        args.log_directory,
         f"s2s_{experiment_params}_{get_timestamp()}", args)
     model_path = os.path.join(experiment_dir, "model.pt")
     tb_writer = SummaryWriter(experiment_dir)
@@ -254,10 +258,10 @@ def main():
         decoder = BertModel(transformer_config).to(device)
     elif args.model_type == "rnn":
         encoder = RNNEncoder(
-            ar_text_field.vocab, args.hidden_size, args.embedding_dim,
+            ar_text_field.vocab, args.hidden_size, args.hidden_size,
             args.layers, dropout=0.1).to(device)
         decoder = RNNDecoder(
-            en_text_field.vocab, args.hidden_size, args.embedding_dim,
+            en_text_field.vocab, args.hidden_size, args.hidden_size,
             args.layers, attention_heads=args.attention_heads,
             dropout=0.1, output_proj=True).to(device)
     else:
@@ -302,7 +306,7 @@ def main():
             optimizer.step()
             optimizer.zero_grad()
 
-            if step % 500 == 499:
+            if step % args.validation_frequency == args.validation_frequency - 1:
                 tb_writer.add_scalar('train/nll', loss, step)
                 model.eval()
 

@@ -43,6 +43,10 @@ def main():
                         help="Number of no-improvement validations before "
                              "early finishing.")
     parser.add_argument("--learning-rate", default=1e-4, type=float)
+    parser.add_argument("--validation-frequency", default=50, type=int,
+                        help="Number of steps between validations.")
+    parser.add_argument("--log-directory", default="experiments", type=str,
+                        help="Number of steps between validations.")
     args = parser.parse_args()
 
     # TODO PARAMTERICZE LOSSES
@@ -56,6 +60,7 @@ def main():
         f"_batch{args.batch_size}" +
         f"_patence{args.patience}")
     experiment_dir = experiment_logging(
+        args.log_directory,
         f"edit_class_{experiment_params}_{get_timestamp()}", args)
     model_path = os.path.join(experiment_dir, "model.pt")
     # tb_writer = SummaryWriter(experiment_dir)
@@ -73,10 +78,6 @@ def main():
         en_text_field = data.Field(
             tokenize=(lambda s: s.split()) if args.tgt_tokenized else list,
             init_token="<s>", eos_token="</s>", batch_first=True)
-    save_vocab(
-        ar_text_field.vocab.itos, os.path.join(experiment_dir, "src_vocab"))
-    save_vocab(
-        en_text_field.vocab.itos, os.path.join(experiment_dir, "tgt_vocab"))
     labels_field = data.Field(sequential=False)
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -91,6 +92,11 @@ def main():
         en_text_field.build_vocab(train_data)
     labels_field.build_vocab(train_data)
     true_class_label = labels_field.vocab.stoi['1']
+
+    save_vocab(
+        ar_text_field.vocab.itos, os.path.join(experiment_dir, "src_vocab"))
+    save_vocab(
+        en_text_field.vocab.itos, os.path.join(experiment_dir, "tgt_vocab"))
 
     train_iter, val_iter, test_iter = data.Iterator.splits(
         (train_data, val_data, test_data), batch_sizes=[args.batch_size] * 3,
@@ -164,7 +170,7 @@ def main():
             optimizer.step()
             optimizer.zero_grad()
 
-            if step % 50 == 49:
+            if step % args.validation_frequency == args.validation_frequency - 1:
                 model.eval()
                 with torch.no_grad():
                     false_scores = []

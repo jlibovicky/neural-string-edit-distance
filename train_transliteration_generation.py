@@ -56,6 +56,10 @@ def main():
                         help="Factor by which the learning rate is decayed.")
     parser.add_argument("--learning-rate", default=1e-4, type=float,
                         help="Initial learning rate.")
+    parser.add_argument("--validation-frequency", default=50, type=int,
+                        help="Number of steps between validations.")
+    parser.add_argument("--log-directory", default="experiments", type=str,
+                        help="Number of steps between validations.")
     args = parser.parse_args()
 
     if (args.nll_loss is None and
@@ -79,6 +83,7 @@ def main():
         f"_finalStateLoss{args.final_state_loss}" +
         f"_distortion{args.distortion_loss}")
     experiment_dir = experiment_logging(
+        args.log_directory,
         f"edit_gen_{experiment_params}_{get_timestamp()}", args)
     model_path = os.path.join(experiment_dir, "model.pt")
     tb_writer = SummaryWriter(experiment_dir)
@@ -206,7 +211,8 @@ def main():
                 optimizer.step()
                 optimizer.zero_grad()
 
-            if step % (args.delay_update * 50) == args.delay_update * 50 - 1:
+            if (step % (args.delay_update * args.validation_frequency) ==
+                    args.delay_update * args.validation_frequency - 1):
                 tb_writer.add_scalar('train/loss', loss, step)
                 tb_writer.add_scalar('train/nll', nll_loss, step)
                 tb_writer.add_scalar('train/em_kl_div', kl_loss, step)

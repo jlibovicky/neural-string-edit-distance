@@ -25,8 +25,8 @@ def save_git_info(git_commit_file: str, git_diff_file: str,
             cwd=repo_dir, stdout=file, check=False)
 
 
-def experiment_logging(experiment_id: str, args) -> str:
-    experiment_dir = os.path.join("experiments", experiment_id)
+def experiment_logging(root: str, experiment_id: str, args) -> str:
+    experiment_dir = os.path.join(root, experiment_id)
     os.mkdir(experiment_dir)
 
     save_git_info(

@@ -42,6 +42,10 @@ def main():
         "--patience", default=10, type=int,
         help="Number of validations witout improvement before finishing.")
     parser.add_argument("--learning-rate", default=1e-4, type=float)
+    parser.add_argument("--validation-frequency", default=50, type=int,
+                        help="Number of steps between validations.")
+    parser.add_argument("--log-directory", default="experiments", type=str,
+                        help="Number of steps between validations.")
     args = parser.parse_args()
 
     experiment_params = (
@@ -53,6 +57,7 @@ def main():
         f"_patence{args.patience}" +
         f"_delay{args.delay_update}")
     experiment_dir = experiment_logging(
+        args.log_directory,
         f"cognates_class_{experiment_params}_{get_timestamp()}", args)
     model_path = os.path.join(experiment_dir, "model.pt")
 
@@ -118,7 +123,7 @@ def main():
             optimizer.step()
             optimizer.zero_grad()
 
-            if step % 50 == 49:
+            if step % args.validation_frequency == args.validation_frequency - 1:
                 model.eval()
                 with torch.no_grad():
                     false_scores = []

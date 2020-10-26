@@ -534,6 +534,7 @@ class NeuralEditDistBase(EditDistBase):
 
         return alphas
 
+
 class EditDistNeuralModelConcurrent(NeuralEditDistBase):
     """Model for binary sequence-pari classification."""
     def __init__(self, ar_vocab, en_vocab, device, directed=False,
