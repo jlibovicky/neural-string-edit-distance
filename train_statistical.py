@@ -40,25 +40,25 @@ def main():
         f"edit_stat_{experiment_params}_{get_timestamp()}", args)
     model_path = os.path.join(experiment_dir, "model.pt")
 
-    ar_text_field = data.Field(
+    src_text_field = data.Field(
         tokenize=(lambda s: s.split()) if args.src_tokenized else list,
         init_token="<s>", eos_token="</s>", batch_first=True)
-    en_text_field = data.Field(
+    tgt_text_field = data.Field(
         tokenize=(lambda s: s.split()) if args.tgt_tokenized else list,
         init_token="<s>", eos_token="</s>", batch_first=True)
 
     train_data, val_data, test_data = data.TabularDataset.splits(
         path=args.data_prefix, train='train.txt',
         validation='eval.txt', test='test.txt', format='tsv',
-        fields=[('ar', ar_text_field), ('en', en_text_field)])
+        fields=[('ar', src_text_field), ('en', tgt_text_field)])
 
-    ar_text_field.build_vocab(train_data)
-    en_text_field.build_vocab(train_data)
+    src_text_field.build_vocab(train_data)
+    tgt_text_field.build_vocab(train_data)
 
     save_vocab(
-        ar_text_field.vocab.itos, os.path.join(experiment_dir, "src_vocab"))
+        src_text_field.vocab.itos, os.path.join(experiment_dir, "src_vocab"))
     save_vocab(
-        en_text_field.vocab.itos, os.path.join(experiment_dir, "tgt_vocab"))
+        tgt_text_field.vocab.itos, os.path.join(experiment_dir, "tgt_vocab"))
     logging.info("Loaded data, created vocabularies..")
 
     # pylint: disable=W0632
@@ -67,9 +67,9 @@ def main():
         shuffle=True, device=0, sort_key=lambda x: len(x.ar))
     # pylint: enable=W0632
 
-    model = EditDistStatModel(ar_text_field.vocab, en_text_field.vocab)
+    model = EditDistStatModel(src_text_field.vocab, tgt_text_field.vocab)
 
-    smallest_entropy = 1e9
+    smallest_tgttropy = 1e9
     examples = 0
     stat_expecations = []
     logging.info("Training starts.")
@@ -89,8 +89,8 @@ def main():
                 logging.info("stat. model entropy = %.10g", entropy.cpu())
                 stat_expecations = []
 
-                if entropy < smallest_entropy:
-                    smallest_entropy = entropy
+                if entropy < smallest_tgttropy:
+                    smallest_tgttropy = entropy
                     torch.save(model, model_path)
 
             if examples % 200 == 199:
@@ -106,9 +106,9 @@ def main():
 
                         if j < 10:
                             src_string = decode_ids(
-                                val_ex.ar[0], ar_text_field)
+                                val_ex.ar[0], src_text_field)
                             tgt_string = decode_ids(
-                                val_ex.en[0], en_text_field)
+                                val_ex.en[0], tgt_text_field)
 
                             logging.info(
                                 "%s -> %s  %f", src_string, tgt_string,

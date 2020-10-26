@@ -228,20 +228,20 @@ def main():
     tb_writer = SummaryWriter(experiment_dir)
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    ar_text_field, en_text_field, train_iter, val_iter, test_iter = \
+    src_text_field, tgt_text_field, train_iter, val_iter, test_iter = \
         load_transliteration_data(
             args.data_prefix, args.batch_size, device,
             src_tokenized=args.src_tokenized,
             tgt_tokenized=args.tgt_tokenized)
 
     save_vocab(
-        ar_text_field.vocab.itos, os.path.join(experiment_dir, "src_vocab"))
+        src_text_field.vocab.itos, os.path.join(experiment_dir, "src_vocab"))
     save_vocab(
-        en_text_field.vocab.itos, os.path.join(experiment_dir, "tgt_vocab"))
+        tgt_text_field.vocab.itos, os.path.join(experiment_dir, "tgt_vocab"))
 
     if args.model_type == "transformer":
         transformer_config = BertConfig(
-            vocab_size=len(ar_text_field.vocab),
+            vocab_size=len(src_text_field.vocab),
             is_decoder=False,
             hidden_size=args.hidden_size,
             num_hidden_layers=args.layers,
@@ -254,14 +254,14 @@ def main():
         encoder = BertModel(transformer_config).to(device)
 
         transformer_config.is_decoder = True
-        transformer_config.vocab_size = len(en_text_field.vocab)
+        transformer_config.vocab_size = len(tgt_text_field.vocab)
         decoder = BertModel(transformer_config).to(device)
     elif args.model_type == "rnn":
         encoder = RNNEncoder(
-            ar_text_field.vocab, args.hidden_size, args.hidden_size,
+            src_text_field.vocab, args.hidden_size, args.hidden_size,
             args.layers, dropout=0.1).to(device)
         decoder = RNNDecoder(
-            en_text_field.vocab, args.hidden_size, args.hidden_size,
+            tgt_text_field.vocab, args.hidden_size, args.hidden_size,
             args.layers, attention_heads=args.attention_heads,
             dropout=0.1, output_proj=True).to(device)
     else:
@@ -269,10 +269,10 @@ def main():
 
     model = Seq2SeqModel(
         encoder, decoder,
-        src_pad_token_id=ar_text_field.vocab.stoi[ar_text_field.pad_token],
-        tgt_bos_token_id=en_text_field.vocab.stoi[en_text_field.init_token],
-        tgt_eos_token_id=en_text_field.vocab.stoi[en_text_field.eos_token],
-        tgt_pad_token_id=en_text_field.vocab.stoi[en_text_field.pad_token],
+        src_pad_token_id=src_text_field.vocab.stoi[src_text_field.pad_token],
+        tgt_bos_token_id=tgt_text_field.vocab.stoi[tgt_text_field.init_token],
+        tgt_eos_token_id=tgt_text_field.vocab.stoi[tgt_text_field.eos_token],
+        tgt_pad_token_id=tgt_text_field.vocab.stoi[tgt_text_field.pad_token],
         device=device)
 
     nll = nn.CrossEntropyLoss().to(device)
@@ -296,7 +296,7 @@ def main():
             logits = model(train_batch.ar, train_batch.en)[0]
 
             loss = nll(
-                logits.reshape([-1, len(en_text_field.vocab)]),
+                logits.reshape([-1, len(tgt_text_field.vocab)]),
                 train_batch.en[:, 1:].reshape([-1]))
             loss.backward()
 
@@ -317,12 +317,12 @@ def main():
                     with torch.no_grad():
                         src_string = [
                             decode_ids(
-                                val_ex, ar_text_field,
+                                val_ex, src_text_field,
                                 tokenized=args.src_tokenized)
                             for val_ex in val_batch.ar]
                         tgt_string = [
                             decode_ids(
-                                val_ex, en_text_field,
+                                val_ex, tgt_text_field,
                                 tokenized=args.tgt_tokenized)
                             for val_ex in val_batch.en]
 
@@ -331,7 +331,7 @@ def main():
                             max_len=2 * val_batch.ar.size(1))
 
                         hypotheses = [
-                            decode_ids(out, en_text_field,
+                            decode_ids(out, tgt_text_field,
                                        tokenized=args.tgt_tokenized)
                             for out in decoded_val[0]]
 
@@ -386,11 +386,11 @@ def main():
     for j, test_batch in enumerate(test_iter):
         with torch.no_grad():
             src_string = [
-                decode_ids(test_ex, ar_text_field,
+                decode_ids(test_ex, src_text_field,
                            tokenized=args.src_tokenized)
                 for test_ex in test_batch.ar]
             tgt_string = [
-                decode_ids(test_ex, en_text_field,
+                decode_ids(test_ex, tgt_text_field,
                            tokenized=args.tgt_tokenized)
                 for test_ex in test_batch.en]
 
@@ -399,7 +399,7 @@ def main():
                 max_len=2 * test_batch.ar.size(1))
 
             hypotheses = [
-                decode_ids(out, en_text_field, tokenized=args.tgt_tokenized)
+                decode_ids(out, tgt_text_field, tokenized=args.tgt_tokenized)
                 for out in decoded_val[0]]
 
             ground_truth.extend(tgt_string)

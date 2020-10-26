@@ -18,27 +18,27 @@ def load_vocab(file):
 def load_transliteration_data(
         data_prefix, batch_size, device, src_tokenized=False,
         tgt_tokenized=False):
-    ar_text_field = data.Field(
+    src_text_field = data.Field(
         tokenize=(lambda s: s.split()) if src_tokenized else list,
         init_token="<s>", eos_token="</s>", batch_first=True)
-    en_text_field = data.Field(
+    tgt_text_field = data.Field(
         tokenize=(lambda s: s.split()) if tgt_tokenized else list,
         init_token="<s>", eos_token="</s>", batch_first=True)
 
     train_data, val_data, test_data = data.TabularDataset.splits(
         path=data_prefix, train='train.txt',
         validation='eval.txt', test='test.txt', format='tsv',
-        fields=[('ar', ar_text_field), ('en', en_text_field)])
+        fields=[('ar', src_text_field), ('en', tgt_text_field)])
 
-    ar_text_field.build_vocab(train_data)
-    en_text_field.build_vocab(train_data)
+    src_text_field.build_vocab(train_data)
+    tgt_text_field.build_vocab(train_data)
 
     train_iter, val_iter, test_iter = data.Iterator.splits(
         (train_data, val_data, test_data),
         batch_sizes=(batch_size, batch_size, 32),
         shuffle=True, device=device, sort_key=lambda x: len(x.ar))
 
-    return (ar_text_field, en_text_field, train_iter, val_iter, test_iter)
+    return (src_text_field, tgt_text_field, train_iter, val_iter, test_iter)
 
 
 def decode_ids(ids_list, vocab, tokenized=False):

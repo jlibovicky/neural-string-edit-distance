@@ -65,7 +65,7 @@ def main():
     model_path = os.path.join(experiment_dir, "model.pt")
     # tb_writer = SummaryWriter(experiment_dir)
 
-    ar_text_field = data.Field(
+    src_text_field = data.Field(
         tokenize=(lambda s: s.split()) if args.src_tokenized else list,
         init_token="<s>", eos_token="</s>", batch_first=True)
     if args.share_encoders:
@@ -73,9 +73,9 @@ def main():
             raise ValueError(
                 "Source and target must be tokenized the same way when "
                 "sharing encoders.")
-        en_text_field = ar_text_field
+        tgt_text_field = src_text_field
     else:
-        en_text_field = data.Field(
+        tgt_text_field = data.Field(
             tokenize=(lambda s: s.split()) if args.tgt_tokenized else list,
             init_token="<s>", eos_token="</s>", batch_first=True)
     labels_field = data.Field(sequential=False)
@@ -84,26 +84,26 @@ def main():
     train_data, val_data, test_data = data.TabularDataset.splits(
         path=args.data_prefix, train='train.txt',
         validation='eval.txt', test='test.txt', format='tsv',
-        fields=[('ar', ar_text_field), ('en', en_text_field),
+        fields=[('ar', src_text_field), ('en', tgt_text_field),
                 ('labels', labels_field)])
 
-    ar_text_field.build_vocab(train_data)
+    src_text_field.build_vocab(train_data)
     if not args.share_encoders:
-        en_text_field.build_vocab(train_data)
+        tgt_text_field.build_vocab(train_data)
     labels_field.build_vocab(train_data)
     true_class_label = labels_field.vocab.stoi['1']
 
     save_vocab(
-        ar_text_field.vocab.itos, os.path.join(experiment_dir, "src_vocab"))
+        src_text_field.vocab.itos, os.path.join(experiment_dir, "src_vocab"))
     save_vocab(
-        en_text_field.vocab.itos, os.path.join(experiment_dir, "tgt_vocab"))
+        tgt_text_field.vocab.itos, os.path.join(experiment_dir, "tgt_vocab"))
 
     train_iter, val_iter, test_iter = data.Iterator.splits(
         (train_data, val_data, test_data), batch_sizes=[args.batch_size] * 3,
         shuffle=True, device=device, sort_key=lambda x: len(x.ar))
 
     model = EditDistNeuralModelConcurrent(
-        ar_text_field.vocab, en_text_field.vocab, device,
+        src_text_field.vocab, tgt_text_field.vocab, device,
         model_type=args.model_type,
         hidden_dim=args.hidden_size,
         hidden_layers=args.layers,
@@ -131,10 +131,10 @@ def main():
             pos_mask = target.unsqueeze(1).unsqueeze(2)
             neg_mask = 1 - pos_mask
 
-            ar_mask = (train_batch.ar != model.ar_pad).float()
-            en_mask = (train_batch.en != model.en_pad).float()
+            src_mask = (train_batch.ar != model.src_pad).float()
+            tgt_mask = (train_batch.en != model.tgt_pad).float()
 
-            action_mask = ar_mask.unsqueeze(2) * en_mask.unsqueeze(1)
+            action_mask = src_mask.unsqueeze(2) * tgt_mask.unsqueeze(1)
 
             action_scores, expected_counts, logprobs, distorted_probs = model(
                 train_batch.ar, train_batch.en)

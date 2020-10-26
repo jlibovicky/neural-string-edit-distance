@@ -28,6 +28,7 @@ def main():
     parser.add_argument("--nll-loss", default=None, type=float)
     parser.add_argument("--distortion-loss", default=None, type=float)
     parser.add_argument("--final-state-loss", default=None, type=float)
+    parser.add_argument("--contrastive-loss", default=None, type=float)
     parser.add_argument("--model-type", default='transformer',
                         choices=["transformer", "rnn", "embeddings", "cnn"])
     parser.add_argument("--embedding-dim", default=256, type=int)
@@ -89,19 +90,19 @@ def main():
     tb_writer = SummaryWriter(experiment_dir)
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    ar_text_field, en_text_field, train_iter, val_iter, test_iter = \
+    src_text_field, tgt_text_field, train_iter, val_iter, test_iter = \
         load_transliteration_data(
             args.data_prefix, args.batch_size, device,
             src_tokenized=args.src_tokenized,
             tgt_tokenized=args.tgt_tokenized)
 
     save_vocab(
-        ar_text_field.vocab.itos, os.path.join(experiment_dir, "src_vocab"))
+        src_text_field.vocab.itos, os.path.join(experiment_dir, "src_vocab"))
     save_vocab(
-        en_text_field.vocab.itos, os.path.join(experiment_dir, "tgt_vocab"))
+        tgt_text_field.vocab.itos, os.path.join(experiment_dir, "tgt_vocab"))
 
     model = EditDistNeuralModelProgressive(
-        ar_text_field.vocab, en_text_field.vocab, device, directed=True,
+        src_text_field.vocab, tgt_text_field.vocab, device, directed=True,
         model_type=args.model_type,
         hidden_dim=args.hidden_size,
         hidden_layers=args.layers,
@@ -112,6 +113,7 @@ def main():
     kl_div = nn.KLDivLoss(reduction='none').to(device)
     nll = nn.NLLLoss(reduction='none').to(device)
     xent = nn.CrossEntropyLoss(reduction='none').to(device)
+    bce = nn.BCELoss()
     optimizer = optim.Adam(
         model.parameters(), lr=args.learning_rate)
 
@@ -141,12 +143,13 @@ def main():
             step += 1
 
             (action_scores, expected_counts,
-             logprob, next_symbol_score, distorted_probs) = model(
-                 train_ex.ar, train_ex.en)
+             logprob, next_symbol_score, distorted_probs, contrastive_logprob) = model(
+                 train_ex.ar, train_ex.en,
+                 contrastive_probs=args.contrastive_loss is not None)
 
-            en_mask = (train_ex.en != model.en_pad).float()
-            ar_mask = (train_ex.ar != model.ar_pad).float()
-            table_mask = (ar_mask.unsqueeze(2) * en_mask.unsqueeze(1)).float()
+            tgt_mask = (train_ex.en != model.tgt_pad).float()
+            src_mask = (train_ex.ar != model.src_pad).float()
+            table_mask = (src_mask.unsqueeze(2) * tgt_mask.unsqueeze(1)).float()
 
             loss = torch.tensor(0.).to(device)
             kl_loss = 0
@@ -183,8 +186,8 @@ def main():
                     next_symbol_score.reshape(-1, tgt_dim),
                     train_ex.en[:, 1:].reshape(-1))
                 nll_loss = (
-                    (en_mask[:, 1:].reshape(-1) * nll_loss_raw).sum() /
-                    en_mask[:, 1:].sum())
+                    (tgt_mask[:, 1:].reshape(-1) * nll_loss_raw).sum() /
+                    tgt_mask[:, 1:].sum())
                 loss += args.nll_loss * nll_loss
 
             distortion_loss = 0
@@ -195,18 +198,27 @@ def main():
 
             final_state_loss = 0
             if args.final_state_loss is not None:
-                final_state_loss = -logprob.mean()
+                final_state_loss = bce(logprob.exp(), torch.ones_like(logprob))
                 loss += args.final_state_loss * final_state_loss
+
+            contrastive_loss = 0
+            if args.contrastive_loss is not None:
+                contrastive_loss = bce(
+                    contrastive_logprob.exp(),
+                    torch.zeros_like(contrastive_logprob))
+                loss += args.contrastive_loss * contrastive_loss
 
             loss.backward()
 
             if step % args.delay_update == args.delay_update - 1:
                 logging.info(
                     "step: %d, train loss = %.3g "
-                    "(NLL %.3g, distortion: %.3g, final state NLL: %.3g, "
+                    "(NLL %.3g, distortion: %.3g, "
+                    "final state NLL: %.3g, "
+                    "final state contr: %.3g, "
                     "EM: %.3g, sampled EM: %.3g)",
                     step, loss, nll_loss, distortion_loss, final_state_loss,
-                    kl_loss, sampled_em_loss)
+                    contrastive_loss, kl_loss, sampled_em_loss)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 optimizer.step()
                 optimizer.zero_grad()
@@ -231,11 +243,11 @@ def main():
                         for ar, en, hyp in zip(
                                 val_ex.ar, val_ex.en, decoded_val):
                             src_string = decode_ids(
-                                ar, ar_text_field, args.src_tokenized)
+                                ar, src_text_field, args.src_tokenized)
                             tgt_string = decode_ids(
-                                en, en_text_field, args.tgt_tokenized)
+                                en, tgt_text_field, args.tgt_tokenized)
                             hypothesis = decode_ids(
-                                hyp, en_text_field, args.tgt_tokenized)
+                                hyp, tgt_text_field, args.tgt_tokenized)
 
                             sources.append(src_string)
                             ground_truth.append(tgt_string)
@@ -299,9 +311,9 @@ def main():
                 test_ex.ar, beam_size=args.beam_size)
 
             for ar, en, hyp in zip(test_ex.ar, test_ex.en, decoded_val):
-                src_string = decode_ids(ar, ar_text_field, args.src_tokenized)
-                tgt_string = decode_ids(en, en_text_field, args.tgt_tokenized)
-                hypothesis = decode_ids(hyp, en_text_field, args.tgt_tokenized)
+                src_string = decode_ids(ar, src_text_field, args.src_tokenized)
+                tgt_string = decode_ids(en, tgt_text_field, args.tgt_tokenized)
+                hypothesis = decode_ids(hyp, tgt_text_field, args.tgt_tokenized)
 
                 sources.append(src_string)
                 ground_truth.append(tgt_string)

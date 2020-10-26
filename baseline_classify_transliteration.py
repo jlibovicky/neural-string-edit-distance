@@ -68,18 +68,18 @@ def main():
     parser.add_argument("data_prefix", type=str)
     args = parser.parse_args()
 
-    ar_text_field = data.Field(tokenize=list)
-    en_text_field = data.Field(tokenize=list)
+    src_text_field = data.Field(tokenize=list)
+    tgt_text_field = data.Field(tokenize=list)
     labels_field = data.Field(sequential=False)
 
     train_data, val_data, test_data = data.TabularDataset.splits(
         path=args.data_prefix, train='train.txt',
         validation='eval.txt', test='test.txt', format='tsv',
-        fields=[('ar', ar_text_field), ('en', en_text_field),
+        fields=[('ar', src_text_field), ('en', tgt_text_field),
                 ('labels', labels_field)])
 
-    ar_text_field.build_vocab(train_data)
-    en_text_field.build_vocab(train_data)
+    src_text_field.build_vocab(train_data)
+    tgt_text_field.build_vocab(train_data)
     labels_field.build_vocab(train_data)
     true_class_label = labels_field.vocab.stoi['1']
     import ipdb; ipdb.set_trace()
@@ -88,8 +88,8 @@ def main():
         (train_data, val_data, test_data), batch_sizes=(256, 256, 256),
         shuffle=True, device=0, sort_key=lambda x: len(x.ar))
 
-    ar_transformer = Encoder(ar_text_field.vocab, 2, 128, 4)
-    en_transformer = Encoder(en_text_field.vocab, 2, 128, 4)
+    src_transformer = Encoder(src_text_field.vocab, 2, 128, 4)
+    tgt_transformer = Encoder(tgt_text_field.vocab, 2, 128, 4)
     classifier = nn.Sequential(
         nn.Dropout(0.1),
         nn.Linear(2 * 128, 128),
@@ -99,16 +99,16 @@ def main():
 
     xent = nn.BCEWithLogitsLoss()
     optimizer = optim.Adam(
-        chain(ar_transformer.parameters(),
-              en_transformer.parameters(),
+        chain(src_transformer.parameters(),
+              tgt_transformer.parameters(),
               classifier.parameters()))
 
     for _ in range(10):
         for i, batch in enumerate(train_iter):
-            ar_vector = ar_transformer(batch.ar)
-            en_vector = en_transformer(batch.en)
+            src_vector = ar_transformer(batch.ar)
+            tgt_vector = en_transformer(batch.en)
 
-            output = classifier(torch.cat((ar_vector, en_vector), 1))
+            output = classifier(torch.cat((src_vector, tgt_vector), 1))
             target = (batch.labels == true_class_label).float()
 
             loss = xent(output.squeeze(1), target)
@@ -118,24 +118,24 @@ def main():
             optimizer.zero_grad()
 
             if i % 20 == 19:
-                ar_transformer.eval()
-                en_transformer.eval()
+                src_transformer.eval()
+                tgt_transformer.eval()
                 classifier.eval()
                 with torch.no_grad():
                     correct_count = 0
 
                     for val_batch in val_iter:
-                        ar_vector = ar_transformer(val_batch.ar)
-                        en_vector = en_transformer(val_batch.en)
-                        output = classifier(torch.cat((ar_vector, en_vector), 1))
+                        src_vector = ar_transformer(val_batch.ar)
+                        tgt_vector = en_transformer(val_batch.en)
+                        output = classifier(torch.cat((src_vector, tgt_vector), 1))
                         prediction = output > 0.0
                         target = val_batch.labels == true_class_label
                         correct_count += (target == prediction.squeeze(1)).float().sum()
 
                     print(correct_count / len(val_data))
 
-                ar_transformer.train()
-                en_transformer.train()
+                src_transformer.train()
+                tgt_transformer.train()
                 classifier.train()
 
 

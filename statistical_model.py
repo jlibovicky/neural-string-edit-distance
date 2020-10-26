@@ -10,11 +10,11 @@ class EditDistStatModel(EditDistBase):
     This is a reimplemntation of the original learnable edit distance algorithm
     in PyTorch using the same interface as the neural models.
     """
-    def __init__(self, ar_vocab, en_vocab, start_symbol="<s>",
+    def __init__(self, src_vocab, tgt_vocab, start_symbol="<s>",
                  end_symbol="</s>", pad_symbol="<pad>",
                  identitiy_initialize=True):
         super().__init__(
-            ar_vocab, en_vocab, start_symbol, end_symbol, pad_symbol)
+            src_vocab, tgt_vocab, start_symbol, end_symbol, pad_symbol)
 
         weights = torch.tensor([
             1 / self.n_target_classes for _ in range(self.n_target_classes)])
@@ -22,10 +22,10 @@ class EditDistStatModel(EditDistBase):
         if identitiy_initialize:
             idenity_weight = [0. for _ in range(self.n_target_classes)]
             id_count = 0
-            for idx, symbol in enumerate(self.ar_vocab.itos):
-                if symbol in self.en_vocab.stoi:
+            for idx, symbol in enumerate(self.src_vocab.itos):
+                if symbol in self.tgt_vocab.stoi:
                     idenity_weight[self._substitute_id(
-                        idx, self.en_vocab[symbol])] = 1.
+                        idx, self.tgt_vocab[symbol])] = 1.
                     id_count += 1
             idenity_weight_tensor = torch.tensor(idenity_weight) / id_count
             weights = (weights + idenity_weight_tensor) / 2
@@ -33,18 +33,18 @@ class EditDistStatModel(EditDistBase):
         self.weights = torch.log(weights)
 
 
-    def _forward_evaluation(self, ar_sent, en_sent):
-        ar_len, en_len = ar_sent.size(1), en_sent.size(1)
-        alpha = torch.zeros((ar_len, en_len)) + MINF
+    def _forward_evaluation(self, src_sent, tgt_sent):
+        src_len, tgt_len = ar_sent.size(1), tgt_sent.size(1)
+        alpha = torch.zeros((src_len, tgt_len)) + MINF
         alpha[0, 0] = 0
-        for t, ar_char in enumerate(ar_sent[0]):
-            for v, en_char in enumerate(en_sent[0]):
+        for t, src_char in enumerate(src_sent[0]):
+            for v, tgt_char in enumerate(tgt_sent[0]):
                 if t == 0 and v == 0:
                     continue
 
-                deletion_id = self._deletion_id(ar_char)
-                insertion_id = self._insertion_id(en_char)
-                subsitute_id = self._substitute_id(ar_char, en_char)
+                deletion_id = self._deletion_id(src_char)
+                insertion_id = self._insertion_id(tgt_char)
+                subsitute_id = self._substitute_id(src_char, tgt_char)
 
                 to_sum = [alpha[t, v]]
                 if v >= 1:
@@ -58,35 +58,35 @@ class EditDistStatModel(EditDistBase):
                 alpha[t, v] = torch.logsumexp(torch.tensor(to_sum), dim=0)
         return alpha
 
-    def forward(self, ar_sent, en_sent):
-        ar_len, en_len = ar_sent.size(1), en_sent.size(1)
-        table_shape = ((ar_len, en_len, self.n_target_classes))
+    def forward(self, src_sent, tgt_sent):
+        src_len, tgt_len = ar_sent.size(1), tgt_sent.size(1)
+        table_shape = ((src_len, tgt_len, self.n_target_classes))
 
-        alpha = self._forward_evaluation(ar_sent, en_sent)
+        alpha = self._forward_evaluation(src_sent, tgt_sent)
 
         plausible_deletions = torch.zeros(table_shape) + MINF
         plausible_insertions = torch.zeros(table_shape) + MINF
         plausible_substitutions = torch.zeros(table_shape) + MINF
 
-        beta = torch.zeros((ar_len, en_len)) + MINF
+        beta = torch.zeros((src_len, tgt_len)) + MINF
         beta[-1, -1] = 0.0
 
-        for t in reversed(range(ar_len)):
-            for v in reversed(range(en_len)):
+        for t in reversed(range(src_len)):
+            for v in reversed(range(tgt_len)):
                 to_sum = [beta[t, v]]
-                if v < en_len - 1:
-                    insertion_id = self._insertion_id(en_sent[0, v + 1])
+                if v < tgt_len - 1:
+                    insertion_id = self._insertion_id(tgt_sent[0, v + 1])
                     plausible_insertions[t, v, insertion_id] = 0
                     to_sum.append(
                         self.weights[insertion_id] + beta[t, v + 1])
-                if t < ar_len - 1:
-                    deletion_id = self._deletion_id(ar_sent[0, t + 1])
+                if t < src_len - 1:
+                    deletion_id = self._deletion_id(src_sent[0, t + 1])
                     plausible_deletions[t, v, deletion_id] = 0
                     to_sum.append(
                         self.weights[deletion_id] + beta[t + 1, v])
-                if v < en_len - 1 and t < ar_len - 1:
+                if v < tgt_len - 1 and t < src_len - 1:
                     subsitute_id = self._substitute_id(
-                        ar_sent[0, t + 1], en_sent[0, v + 1])
+                        src_sent[0, t + 1], tgt_sent[0, v + 1])
                     plausible_substitutions[t, v, subsitute_id] = 0
                     to_sum.append(
                         self.weights[subsitute_id] + beta[t + 1, v + 1])
@@ -118,20 +118,20 @@ class EditDistStatModel(EditDistBase):
         expected_counts = all_counts.logsumexp(0)
         return expected_counts
 
-    def viterbi(self, ar_sent, en_sent):
-        ar_len, en_len = ar_sent.size(1), en_sent.size(1)
+    def viterbi(self, src_sent, tgt_sent):
+        src_len, tgt_len = ar_sent.size(1), tgt_sent.size(1)
 
-        action_count = torch.zeros((ar_len, en_len))
-        alpha = torch.zeros((ar_len, en_len)) - MINF
+        action_count = torch.zeros((src_len, tgt_len))
+        alpha = torch.zeros((src_len, tgt_len)) - MINF
         alpha[0, 0] = 0
-        for t, ar_char in enumerate(ar_sent[0]):
-            for v, en_char in enumerate(en_sent[0]):
+        for t, src_char in enumerate(src_sent[0]):
+            for v, tgt_char in enumerate(tgt_sent[0]):
                 if t == 0 and v == 0:
                     continue
 
-                deletion_id = self._deletion_id(ar_char)
-                insertion_id = self._insertion_id(en_char)
-                subsitute_id = self._substitute_id(ar_char, en_char)
+                deletion_id = self._deletion_id(src_char)
+                insertion_id = self._insertion_id(tgt_char)
+                subsitute_id = self._substitute_id(src_char, tgt_char)
 
                 possible_actions = []
 
@@ -168,47 +168,47 @@ class EditDistStatModel(EditDistBase):
             torch.log(torch.tensor(1 - learning_rate)) + self.weights,
             torch.log(torch.tensor(learning_rate)) + distribution]).logsumexp(0)
 
-    def decode(self, ar_sent, max_len=100, samples=10):
+    def decode(self, src_sent, max_len=100, samples=10):
         assert samples > 0, "With zero samples nothing can be decoded."
-        best_en_sent = []
-        best_en_sent_score = MINF
+        best_tgt_sent = []
+        best_tgt_sent_score = MINF
 
         for _ in range(samples):
-            en_sent = []
-            ar_pos = 1
-            ar_char = ar_sent[0, ar_pos]
+            tgt_sent = []
+            src_pos = 1
+            src_char = ar_sent[0, ar_pos]
 
             for _ in range(max_len):
-                if ar_pos == ar_sent.size(1) - 1:
+                if src_pos == ar_sent.size(1) - 1:
                     break
 
-                ar_char = ar_sent[0, ar_pos]
+                src_char = ar_sent[0, ar_pos]
                 insert_weights = [
                     self.weights[self._insertion_id(i)]
-                    for i in range(self.en_symbol_count)]
-                delete_weight = [self.weights[self._deletion_id(ar_char)]]
+                    for i in range(self.tgt_symbol_count)]
+                delete_weight = [self.weights[self._deletion_id(src_char)]]
                 substitute_weight = [
-                    self.weights[self._substitute_id(ar_char, i)]
-                    for i in range(self.en_symbol_count)]
+                    self.weights[self._substitute_id(src_char, i)]
+                    for i in range(self.tgt_symbol_count)]
 
                 distr = torch.tensor(insert_weights + substitute_weight + delete_weight).exp()
                 distr /= distr.sum()
                 next_op = torch.multinomial(distr, 1)[0]
 
-                if next_op == 2 * self.en_symbol_count:
-                    ar_pos += 1 # DELETE OP
+                if next_op == 2 * self.tgt_symbol_count:
+                    src_pos += 1 # DELETE OP
                     continue
 
-                en_sent.append(next_op % self.en_symbol_count)
-                if next_op > self.en_symbol_count:
-                    ar_pos += 1 # IT WAS A SUBSTITUTION
+                tgt_sent.append(next_op % self.en_symbol_count)
+                if next_op > self.tgt_symbol_count:
+                    src_pos += 1 # IT WAS A SUBSTITUTION
 
-            if not en_sent:
+            if not tgt_sent:
                 continue
 
-            score = self._forward_evaluation(ar_sent, torch.tensor([en_sent]))[-1, -1]
-            if score > best_en_sent_score:
-                best_en_sent_score = score
-                best_en_sent = en_sent
+            score = self._forward_evaluation(src_sent, torch.tensor([tgt_sent]))[-1, -1]
+            if score > best_tgt_sent_score:
+                best_tgt_sent_score = score
+                best_tgt_sent = tgt_sent
 
-        return en_sent
+        return tgt_sent

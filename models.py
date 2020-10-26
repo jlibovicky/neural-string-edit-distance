@@ -16,35 +16,35 @@ MINF = torch.log(torch.tensor(0.))
 
 class EditDistBase(nn.Module):
     """Base class used both for statistical and neural model."""
-    def __init__(self, ar_vocab, en_vocab, start_symbol,
+    def __init__(self, src_vocab, tgt_vocab, start_symbol,
                  end_symbol, pad_symbol, table_type="full", extra_classes=0):
         super().__init__()
 
-        self.ar_vocab = ar_vocab
-        self.en_vocab = en_vocab
+        self.src_vocab = src_vocab
+        self.tgt_vocab = tgt_vocab
 
-        self.ar_bos = ar_vocab[start_symbol]
-        self.ar_eos = ar_vocab[end_symbol]
-        self.ar_pad = ar_vocab[pad_symbol]
-        self.en_bos = en_vocab[start_symbol]
-        self.en_eos = en_vocab[end_symbol]
-        self.en_pad = en_vocab[pad_symbol]
+        self.src_bos = src_vocab[start_symbol]
+        self.src_eos = src_vocab[end_symbol]
+        self.src_pad = src_vocab[pad_symbol]
+        self.tgt_bos = tgt_vocab[start_symbol]
+        self.tgt_eos = tgt_vocab[end_symbol]
+        self.tgt_pad = tgt_vocab[pad_symbol]
 
         self.extra_classes = extra_classes
-        self.ar_symbol_count = len(ar_vocab)
-        self.en_symbol_count = len(en_vocab)
+        self.src_symbol_count = len(src_vocab)
+        self.tgt_symbol_count = len(tgt_vocab)
 
         self.table_type = table_type
 
         if table_type == "full":
-            self.deletion_classes = self.ar_symbol_count
-            self.insertion_classes = self.en_symbol_count
-            self.subs_classes = self.ar_symbol_count * self.en_symbol_count
+            self.deletion_classes = self.src_symbol_count
+            self.insertion_classes = self.tgt_symbol_count
+            self.subs_classes = self.src_symbol_count * self.tgt_symbol_count
             self.n_target_classes = (
                 self.extra_classes +
-                self.ar_symbol_count +  # delete source
-                self.en_symbol_count +  # insert target
-                self.ar_symbol_count * self.en_symbol_count)  # substitute
+                self.src_symbol_count +  # delete source
+                self.tgt_symbol_count +  # insert target
+                self.src_symbol_count * self.tgt_symbol_count)  # substitute
         elif table_type == "tiny":
             self.deletion_classes = 1
             self.insertion_classes = 1
@@ -52,37 +52,37 @@ class EditDistBase(nn.Module):
             self.n_target_classes = self.extra_classes + 3
         elif table_type == "vocab":
             self.deletion_classes = 1
-            self.insertion_classes = self.en_symbol_count
-            self.subs_classes = self.en_symbol_count
+            self.insertion_classes = self.tgt_symbol_count
+            self.subs_classes = self.tgt_symbol_count
             self.n_target_classes = (
-                self.extra_classes + 1 + 2 * self.en_symbol_count)
+                self.extra_classes + 1 + 2 * self.tgt_symbol_count)
         else:
             raise ValueError("Unknown table type.")
 
-    def _deletion_id(self, ar_char):
+    def _deletion_id(self, src_char):
         if self.table_type == "full":
-            return ar_char
-        return torch.zeros_like(ar_char)
+            return src_char
+        return torch.zeros_like(src_char)
 
-    def _insertion_id(self, en_char):
+    def _insertion_id(self, tgt_char):
         if self.table_type == "full":
-            return self.ar_symbol_count + en_char
+            return self.src_symbol_count + tgt_char
         if self.table_type == "tiny":
             return 1
         if self.table_type == "vocab":
-            return 1 + en_char
+            return 1 + tgt_char
         raise RuntimeError("Unknown table type.")
 
-    def _substitute_id(self, ar_char, en_char):
+    def _substitute_id(self, src_char, tgt_char):
         if self.table_type == "full":
-            subs_id = (self.ar_symbol_count + self.en_symbol_count +
-                       self.en_symbol_count * ar_char + en_char)
+            subs_id = (self.src_symbol_count + self.tgt_symbol_count +
+                       self.tgt_symbol_count * src_char + tgt_char)
             assert subs_id < self.n_target_classes
             return subs_id
         if self.table_type == "tiny":
             return 2
         if self.table_type == "vocab":
-            return 1 + self.en_symbol_count + en_char
+            return 1 + self.tgt_symbol_count + tgt_char
         raise RuntimeError("Unknown table type.")
 
 
@@ -110,7 +110,7 @@ class NeuralEditDistBase(EditDistBase):
     Implements the forward and bakward probability computation, the EM loss
     function and Viterbi decoding.
     """
-    def __init__(self, ar_vocab, en_vocab, device, directed=False,
+    def __init__(self, src_vocab, tgt_vocab, device, directed=False,
                  encoder_decoder_attention=True,
                  share_encoders=False,
                  table_type="vocab", extra_classes=0,
@@ -119,14 +119,14 @@ class NeuralEditDistBase(EditDistBase):
                  model_type="transformer",
                  start_symbol="<s>", end_symbol="</s>", pad_symbol="<pad>"):
         super().__init__(
-            ar_vocab, en_vocab, start_symbol, end_symbol, pad_symbol,
+            src_vocab, tgt_vocab, start_symbol, end_symbol, pad_symbol,
             table_type=table_type, extra_classes=extra_classes)
 
         if directed and share_encoders:
             raise ValueError(
                 "You cannot share encoder if one of them is decoder.")
         if share_encoders:
-            if ar_vocab != en_vocab:
+            if src_vocab != tgt_vocab:
                 raise ValueError(
                     "When sharing encoders, vocabularies must be the same.")
 
@@ -139,12 +139,12 @@ class NeuralEditDistBase(EditDistBase):
             self.hidden_dim = 768
         self.hidden_layers = hidden_layers
         self.attention_heads = attention_heads
-        self.ar_encoder = self._encoder_for_vocab(ar_vocab)
+        self.src_encoder = self._encoder_for_vocab(src_vocab)
         if model_type == "bert" or share_encoders:
-            self.en_encoder = self.ar_encoder
+            self.tgt_encoder = self.src_encoder
         else:
-            self.en_encoder = self._encoder_for_vocab(
-                en_vocab, directed=directed)
+            self.tgt_encoder = self._encoder_for_vocab(
+                tgt_vocab, directed=directed)
 
         self.projection = nn.Sequential(
             nn.Dropout(0.1),
@@ -221,34 +221,34 @@ class NeuralEditDistBase(EditDistBase):
             attention_heads=self.attention_heads,
             output_proj=False, dropout=dropout)
 
-    def _encode_ar(self, inputs, mask):
-        return self.ar_encoder(inputs, attention_mask=mask)[0]
+    def _encode_src(self, inputs, mask):
+        return self.src_encoder(inputs, attention_mask=mask)[0]
 
-    def _encode_en(self, inputs, mask, ar_vectors, ar_mask):
+    def _encode_tgt(self, inputs, mask, src_vectors, src_mask):
         if self.encoder_decoder_attention:
-            return self.en_encoder(
+            return self.tgt_encoder(
                 inputs, attention_mask=mask,
-                encoder_hidden_states=ar_vectors,
-                encoder_attention_mask=ar_mask)[0]
-        return self.en_encoder(
+                encoder_hidden_states=src_vectors,
+                encoder_attention_mask=src_mask)[0]
+        return self.tgt_encoder(
             inputs, attention_mask=mask)[0]
 
-    def _action_scores(self, ar_sent, en_sent):
+    def _action_scores(self, src_sent, tgt_sent):
         """Compute possible action probabilities (Eq. 3 and 4)."""
-        ar_len, en_len = ar_sent.size(1), en_sent.size(1)
-        ar_mask = ar_sent != self.ar_pad
-        en_mask = en_sent != self.en_pad
-        ar_vectors = self._encode_ar(ar_sent, ar_mask)
-        en_vectors = self._encode_en(en_sent, en_mask, ar_vectors, ar_mask)
+        src_len, tgt_len = src_sent.size(1), tgt_sent.size(1)
+        src_mask = src_sent != self.src_pad
+        tgt_mask = tgt_sent != self.tgt_pad
+        src_vectors = self._encode_src(src_sent, src_mask)
+        tgt_vectors = self._encode_tgt(tgt_sent, tgt_mask, src_vectors, src_mask)
 
         feature_table = self.projection(torch.cat((
-            ar_vectors.unsqueeze(2).repeat(1, 1, en_len, 1),
-            en_vectors.unsqueeze(1).repeat(1, ar_len, 1, 1)), dim=3))
+            src_vectors.unsqueeze(2).repeat(1, 1, tgt_len, 1),
+            tgt_vectors.unsqueeze(1).repeat(1, src_len, 1, 1)), dim=3))
 
         if self.directed:
             feature_table = torch.cat(
-                (feature_table, en_vectors.unsqueeze(1).repeat(
-                    1, ar_len, 1, 1)),
+                (feature_table, tgt_vectors.unsqueeze(1).repeat(
+                    1, src_len, 1, 1)),
                 dim=3)
 
         # DELETION <<<
@@ -289,29 +289,29 @@ class NeuralEditDistBase(EditDistBase):
         action_scores = F.log_softmax(torch.cat(
             actions_to_concat, dim=3), dim=3)
 
-        assert action_scores.size(1) == ar_len
-        assert action_scores.size(2) == en_len
+        assert action_scores.size(1) == src_len
+        assert action_scores.size(2) == tgt_len
         assert action_scores.size(3) == self.n_target_classes
 
-        return (ar_len, en_len, feature_table, action_scores,
+        return (src_len, tgt_len, feature_table, action_scores,
                 valid_insertion_logits,
                 valid_subs_logits)
 
-    def _forward_evaluation(self, ar_sent, en_sent, action_scores):
+    def _forward_evaluation(self, src_sent, tgt_sent, action_scores):
         """Differentiable forward pass through the model. Algorithm 1."""
         alpha = []
-        batch_size = ar_sent.size(0)
+        batch_size = src_sent.size(0)
         b_range = torch.arange(batch_size).to(self.device)
-        for t, ar_char in enumerate(ar_sent.transpose(0, 1)):
+        for t, src_char in enumerate(src_sent.transpose(0, 1)):
             alpha.append([])
-            for v, en_char in enumerate(en_sent.transpose(0, 1)):
+            for v, tgt_char in enumerate(tgt_sent.transpose(0, 1)):
                 if t == 0 and v == 0:
                     alpha[0].append(torch.zeros((batch_size,)).to(self.device))
                     continue
 
-                deletion_id = self._deletion_id(ar_char)
-                insertion_id = self._insertion_id(en_char)
-                subsitute_id = self._substitute_id(ar_char, en_char)
+                deletion_id = self._deletion_id(src_char)
+                insertion_id = self._insertion_id(tgt_char)
+                subsitute_id = self._substitute_id(src_char, tgt_char)
 
                 to_sum = []
                 if v >= 1:  # INSERTION
@@ -342,7 +342,7 @@ class NeuralEditDistBase(EditDistBase):
 
     @torch.no_grad()
     def _backward_evalatuion_and_expectation(
-            self, ar_len, en_len, ar_sent, en_sent, alpha, action_scores):
+            self, src_len, tgt_len, src_sent, tgt_sent, alpha, action_scores):
         """The backward pass through the edit distance table. Algorithm 2.
 
         Unlike, the forward pass it does not have to be differentiable, because
@@ -353,25 +353,25 @@ class NeuralEditDistBase(EditDistBase):
         plausible_insertions = torch.full_like(action_scores, MINF)
         plausible_substitutions = torch.full_like(action_scores, MINF)
 
-        ar_lengths = (ar_sent != self.ar_pad).sum(1)
-        en_lengths = (en_sent != self.en_pad).sum(1)
+        src_lengths = (src_sent != self.src_pad).sum(1)
+        tgt_lengths = (tgt_sent != self.tgt_pad).sum(1)
 
-        batch_size = ar_sent.size(0)
+        batch_size = src_sent.size(0)
         b_range = torch.arange(batch_size)
 
         beta = torch.full_like(alpha, MINF)
         beta[:, -1, -1] = 0.0
 
-        for t in reversed(range(ar_sent.size(1))):
-            for v in reversed(range(en_sent.size(1))):
+        for t in reversed(range(src_sent.size(1))):
+            for v in reversed(range(tgt_sent.size(1))):
                 # Bool mask: when we are in the table inside both words
-                is_valid = (v <= (en_lengths - 1)) * (t <= (ar_lengths - 1))
+                is_valid = (v <= (tgt_lengths - 1)) * (t <= (src_lengths - 1))
                 # Bool mask: true for end state of word pairs
-                is_corner = (v == (en_lengths - 1)) * (t == (ar_lengths - 1))
+                is_corner = (v == (tgt_lengths - 1)) * (t == (src_lengths - 1))
 
                 to_sum = [beta[:, t, v]]
-                if v < en_len - 1:
-                    insertion_id = self._insertion_id(en_sent[:, v])
+                if v < tgt_len - 1:
+                    insertion_id = self._insertion_id(tgt_sent[:, v])
                     plausible_insertions[b_range, t, v, insertion_id] = 0
 
                     # What would be the insertion score look like if there
@@ -385,8 +385,8 @@ class NeuralEditDistBase(EditDistBase):
                         is_valid,
                         insertion_score_candidate,
                         torch.full_like(insertion_score_candidate, MINF)))
-                if t < ar_len - 1:
-                    deletion_id = self._deletion_id(ar_sent[:, t])
+                if t < src_len - 1:
+                    deletion_id = self._deletion_id(src_sent[:, t])
                     plausible_deletions[b_range, t, v, deletion_id] = 0
 
                     deletion_score_candidate = (
@@ -397,9 +397,9 @@ class NeuralEditDistBase(EditDistBase):
                         is_valid,
                         deletion_score_candidate,
                         torch.full_like(deletion_score_candidate, MINF)))
-                if v < en_len - 1 and t < ar_len - 1:
+                if v < tgt_len - 1 and t < src_len - 1:
                     subsitute_id = self._substitute_id(
-                        ar_sent[:, t], en_sent[:, v])
+                        src_sent[:, t], tgt_sent[:, v])
                     plausible_substitutions[
                         b_range, t, v, subsitute_id] = 0
 
@@ -450,25 +450,25 @@ class NeuralEditDistBase(EditDistBase):
         return alpha_table.exp() * penalties
 
     @torch.no_grad()
-    def viterbi(self, ar_sent, en_sent):
+    def viterbi(self, src_sent, tgt_sent):
         """Get a single best sequence of edit ops for a string pair."""
-        assert ar_sent.size(0) == 1
-        ar_len, en_len, _, action_scores, _, _ = self._action_scores(
-            ar_sent, en_sent)
+        assert src_sent.size(0) == 1
+        src_len, tgt_len, _, action_scores, _, _ = self._action_scores(
+            src_sent, tgt_sent)
         action_scores = action_scores.squeeze(0)
 
-        action_count = torch.zeros((ar_len, en_len))
-        actions = torch.zeros((ar_len, en_len))
-        alpha = torch.zeros((ar_len, en_len)) + MINF
+        action_count = torch.zeros((src_len, tgt_len))
+        actions = torch.zeros((src_len, tgt_len))
+        alpha = torch.zeros((src_len, tgt_len)) + MINF
         alpha[0, 0] = 0
-        for t, ar_char in enumerate(ar_sent[0]):
-            for v, en_char in enumerate(en_sent[0]):
+        for t, src_char in enumerate(src_sent[0]):
+            for v, tgt_char in enumerate(tgt_sent[0]):
                 if t == 0 and v == 0:
                     continue
 
-                deletion_id = self._deletion_id(ar_char)
-                insertion_id = self._insertion_id(en_char)
-                subsitute_id = self._substitute_id(ar_char, en_char)
+                deletion_id = self._deletion_id(src_char)
+                insertion_id = self._insertion_id(tgt_char)
+                subsitute_id = self._substitute_id(src_char, tgt_char)
 
                 possible_actions = []
 
@@ -500,22 +500,22 @@ class NeuralEditDistBase(EditDistBase):
                 actions[t, v] = best_action_id
 
         operations = []
-        t = ar_len - 1
-        v = en_len - 1
+        t = src_len - 1
+        v = tgt_len - 1
         while t > 0 or v > 0:
             if actions[t, v] == 1:
                 operations.append(
-                    ("delete", ar_sent[0, t - 1].cpu().numpy(), t - 1))
+                    ("delete", src_sent[0, t - 1].cpu().numpy(), t - 1))
                 t -= 1
             elif actions[t, v] == 0:
                 operations.append(
-                    ("insert", en_sent[0, v].cpu().numpy(), v))
+                    ("insert", tgt_sent[0, v].cpu().numpy(), v))
                 v -= 1
             elif actions[t, v] == 2:
                 operations.append(
                     ("subs",
-                     (ar_sent[0, t - 1].cpu().numpy(),
-                      en_sent[0, v].cpu().numpy()),
+                     (src_sent[0, t - 1].cpu().numpy(),
+                      tgt_sent[0, v].cpu().numpy()),
                      (t - 1, v)))
                 v -= 1
                 t -= 1
@@ -525,25 +525,25 @@ class NeuralEditDistBase(EditDistBase):
                 operations)
 
     @torch.no_grad()
-    def alpha(self, ar_sent, en_sent):
-        batch_size = ar_sent.size(0)
+    def alpha(self, src_sent, tgt_sent):
+        batch_size = src_sent.size(0)
         _, _, _, action_scores, _, _ = (
-            self._action_scores(ar_sent, en_sent))
+            self._action_scores(src_sent, tgt_sent))
 
-        alphas = self._forward_evaluation(ar_sent, en_sent, action_scores)
+        alphas = self._forward_evaluation(src_sent, tgt_sent, action_scores)
 
         return alphas
 
 
 class EditDistNeuralModelConcurrent(NeuralEditDistBase):
     """Model for binary sequence-pari classification."""
-    def __init__(self, ar_vocab, en_vocab, device, directed=False,
+    def __init__(self, src_vocab, tgt_vocab, device, directed=False,
                  hidden_dim=32, hidden_layers=2, attention_heads=4,
                  share_encoders=False,
                  model_type="transformer",
                  start_symbol="<s>", end_symbol="</s>", pad_symbol="<pad>"):
         super().__init__(
-            ar_vocab, en_vocab, device, directed,
+            src_vocab, tgt_vocab, device, directed,
             encoder_decoder_attention=False,
             share_encoders=share_encoders,
             hidden_dim=hidden_dim, hidden_layers=hidden_layers,
@@ -552,50 +552,50 @@ class EditDistNeuralModelConcurrent(NeuralEditDistBase):
             start_symbol=start_symbol, end_symbol=end_symbol,
             pad_symbol=pad_symbol, model_type=model_type)
 
-    def forward(self, ar_sent, en_sent):
-        batch_size = ar_sent.size(0)
+    def forward(self, src_sent, tgt_sent):
+        batch_size = src_sent.size(0)
         b_range = torch.arange(batch_size)
-        ar_lengths = (ar_sent != self.ar_pad).int().sum(1) - 1
-        en_lengths = (en_sent != self.en_pad).int().sum(1) - 1
-        ar_len, en_len, _, action_scores, _, _ = self._action_scores(
-            ar_sent, en_sent)
+        src_lengths = (src_sent != self.src_pad).int().sum(1) - 1
+        tgt_lengths = (tgt_sent != self.tgt_pad).int().sum(1) - 1
+        src_len, tgt_len, _, action_scores, _, _ = self._action_scores(
+            src_sent, tgt_sent)
 
-        alpha = self._forward_evaluation(ar_sent, en_sent, action_scores)
+        alpha = self._forward_evaluation(src_sent, tgt_sent, action_scores)
         _, expected_counts = self._backward_evalatuion_and_expectation(
-            ar_len, en_len, ar_sent, en_sent, alpha, action_scores)
+            src_len, tgt_len, src_sent, tgt_sent, alpha, action_scores)
 
         distorted_probs = self._alpha_distortion_penalty(
-            ar_len, en_len, alpha)
+            src_len, tgt_len, alpha)
 
         return (action_scores, torch.exp(expected_counts),
-                alpha[b_range, ar_lengths, en_lengths], distorted_probs)
+                alpha[b_range, src_lengths, tgt_lengths], distorted_probs)
 
     @torch.no_grad()
-    def probabilities(self, ar_sent, en_sent):
-        batch_size = ar_sent.size(0)
+    def probabilities(self, src_sent, tgt_sent):
+        batch_size = src_sent.size(0)
         b_range = torch.arange(batch_size)
-        ar_lengths = (ar_sent != self.ar_pad).int().sum(1) - 1
-        en_lengths = (en_sent != self.en_pad).int().sum(1) - 1
+        src_lengths = (src_sent != self.src_pad).int().sum(1) - 1
+        tgt_lengths = (tgt_sent != self.tgt_pad).int().sum(1) - 1
         _, _, _, action_scores, _, _ = (
-            self._action_scores(ar_sent, en_sent))
+            self._action_scores(src_sent, tgt_sent))
 
-        alpha = self._forward_evaluation(ar_sent, en_sent, action_scores)
+        alpha = self._forward_evaluation(src_sent, tgt_sent, action_scores)
 
-        max_lens = torch.max(ar_lengths, en_lengths).float()
-        log_probs = alpha[b_range.to(self.device), ar_lengths, en_lengths]
+        max_lens = torch.max(src_lengths, tgt_lengths).float()
+        log_probs = alpha[b_range.to(self.device), src_lengths, tgt_lengths]
 
         return log_probs.exp(), (log_probs / max_lens).exp()
 
 
 class EditDistNeuralModelProgressive(NeuralEditDistBase):
     """Model for sequence generation."""
-    def __init__(self, ar_vocab, en_vocab, device, directed=True,
+    def __init__(self, src_vocab, tgt_vocab, device, directed=True,
                  hidden_dim=32, hidden_layers=2, attention_heads=4,
                  window=3,
                  encoder_decoder_attention=True, model_type="transformer",
                  start_symbol="<s>", end_symbol="</s>", pad_symbol="<pad>"):
         super().__init__(
-            ar_vocab, en_vocab, device, directed, table_type="vocab",
+            src_vocab, tgt_vocab, device, directed, table_type="vocab",
             model_type=model_type,
             encoder_decoder_attention=encoder_decoder_attention,
             hidden_dim=hidden_dim, hidden_layers=hidden_layers,
@@ -603,17 +603,30 @@ class EditDistNeuralModelProgressive(NeuralEditDistBase):
             start_symbol=start_symbol, end_symbol=end_symbol,
             pad_symbol=pad_symbol)
 
-    def forward(self, ar_sent, en_sent):
-        b_range = torch.arange(ar_sent.size(0))
-        ar_lengths = (ar_sent != self.ar_pad).int().sum(1) - 1
-        en_lengths = (en_sent != self.en_pad).int().sum(1) - 1
-        (ar_len, en_len, _, action_scores,
-            insertion_logits, subs_logits) = self._action_scores(
-                ar_sent, en_sent)
+    def _contrastive_prob(self, src_sent, tgt_sent):
+        tgt_sent  = tgt_sent.flip(0)
+        b_range = torch.arange(src_sent.size(0))
+        src_lengths = (src_sent != self.src_pad).int().sum(1) - 1
+        tgt_lengths = (tgt_sent != self.tgt_pad).int().sum(1) - 1
 
-        alpha = self._forward_evaluation(ar_sent, en_sent, action_scores)
+        _, _, _, action_scores, _, _ = self._action_scores(
+            src_sent, tgt_sent)
+
+        alpha = self._forward_evaluation(src_sent, tgt_sent, action_scores)
+
+        return alpha[b_range, src_lengths, tgt_lengths]
+
+    def forward(self, src_sent, tgt_sent, contrastive_probs=False):
+        b_range = torch.arange(src_sent.size(0))
+        src_lengths = (src_sent != self.src_pad).int().sum(1) - 1
+        tgt_lengths = (tgt_sent != self.tgt_pad).int().sum(1) - 1
+        (src_len, tgt_len, _, action_scores,
+            insertion_logits, subs_logits) = self._action_scores(
+                src_sent, tgt_sent)
+
+        alpha = self._forward_evaluation(src_sent, tgt_sent, action_scores)
         _, expected_counts = self._backward_evalatuion_and_expectation(
-            ar_len, en_len, ar_sent, en_sent, alpha, action_scores)
+            src_len, tgt_len, src_sent, tgt_sent, alpha, action_scores)
 
         insertion_log_dist = (
             F.log_softmax(insertion_logits, dim=3)
@@ -629,15 +642,20 @@ class EditDistNeuralModelProgressive(NeuralEditDistBase):
             next_symbol_logprobs_sum.logsumexp(2, keepdims=True))
 
         distorted_probs = self._alpha_distortion_penalty(
-            ar_len, en_len, alpha)
+            src_len, tgt_len, alpha)
+
+        contrastive_alphas = None
+        if contrastive_probs:
+            contrastive_alphas = self._contrastive_prob(src_sent, tgt_sent)
 
         return (action_scores, torch.exp(expected_counts),
-                alpha[b_range, ar_lengths, en_lengths],
-                next_symbol_logprobs, distorted_probs)
+                alpha[b_range, src_lengths, tgt_lengths],
+                next_symbol_logprobs, distorted_probs,
+                contrastive_alphas)
 
     @torch.no_grad()
     def _scores_for_next_step(
-            self, b_range, v, feature_table, log_ar_mask, alpha):
+            self, b_range, v, feature_table, log_src_mask, alpha):
         """Predict scores of next symbol, given the decoding history.
 
         The decoding history is already in the feature table that contains also
@@ -647,7 +665,7 @@ class EditDistNeuralModelProgressive(NeuralEditDistBase):
             b_range: Technical thing: tensor 0..batch_size
             v: Position in the decoding.
             feature_table: Representation of symbol pairs.
-            log_ar_mask: Position maks for the input in the log domain.
+            log_src_mask: Position maks for the input in the log domain.
             alpha: Table with state probabilties.
 
         Returns:
@@ -658,14 +676,14 @@ class EditDistNeuralModelProgressive(NeuralEditDistBase):
             F.log_softmax(
                 self.insertion_proj(feature_table[b_range, :, v - 1:v]),
                 dim=-1)
-            + log_ar_mask.unsqueeze(2).unsqueeze(3)
+            + log_src_mask.unsqueeze(2).unsqueeze(3)
             + alpha[:, :, v - 1:v].unsqueeze(3))
 
         subs_scores = (
             F.log_softmax(
                 self.substitution_proj(feature_table[b_range, 1:, v - 1:v]),
                 dim=-1)
-            + log_ar_mask[:, 1:].unsqueeze(2).unsqueeze(3)
+            + log_src_mask[:, 1:].unsqueeze(2).unsqueeze(3)
             + alpha[:, 1:, v - 1:v].unsqueeze(3))
 
         next_symb_scores = torch.cat(
@@ -675,8 +693,8 @@ class EditDistNeuralModelProgressive(NeuralEditDistBase):
 
     @torch.no_grad()
     def _update_alpha_with_new_row(
-            self, batch_size, b_range, v, alpha, action_scores, ar_sent,
-            en_sent, ar_len):
+            self, batch_size, b_range, v, alpha, action_scores, src_sent,
+            tgt_sent, src_len):
         """Update the probabilities table for newly decoded characters.
 
         Here, we add a row to the alpha table (probabilities of edit states)
@@ -688,22 +706,22 @@ class EditDistNeuralModelProgressive(NeuralEditDistBase):
             v: Position in the decoding.
             alpha: Alpha table from previous step.
             action_scores: Table with scores for particular edit actions.
-            ar_sent: Source sequence.
-            en_sent: Prefix of so far decoded target sequence.
-            ar_len: Max lenght of the source sequences.
+            src_sent: Source sequence.
+            tgt_sent: Prefix of so far decoded target sequence.
+            src_len: Max lenght of the source sequences.
 
         Return:
             Updated alpha table.
         """
         alpha = torch.cat(
             (alpha, torch.full(
-                (batch_size, ar_len, 1),  MINF).to(self.device)), dim=2)
+                (batch_size, src_len, 1),  MINF).to(self.device)), dim=2)
 
         # TODO masking!
-        for t, ar_char in enumerate(ar_sent.transpose(0, 1)):
-            deletion_id = self._deletion_id(ar_char)
-            insertion_id = self._insertion_id(en_sent[:, v])
-            subsitute_id = self._substitute_id(ar_char, en_sent[:, v])
+        for t, src_char in enumerate(src_sent.transpose(0, 1)):
+            deletion_id = self._deletion_id(src_char)
+            insertion_id = self._insertion_id(tgt_sent[:, v])
+            subsitute_id = self._substitute_id(src_char, tgt_sent[:, v])
 
             to_sum = [
                 action_scores[b_range, t, v, insertion_id] +
@@ -724,81 +742,81 @@ class EditDistNeuralModelProgressive(NeuralEditDistBase):
         return alpha
 
     @torch.no_grad()
-    def decode(self, ar_sent):
-        batch_size = ar_sent.size(0)
+    def decode(self, src_sent):
+        batch_size = src_sent.size(0)
         b_range = torch.arange(batch_size)
 
-        en_sent = torch.tensor([[self.en_bos]] * batch_size).to(self.device)
-        (ar_len, _, feature_table,
-         action_scores, _, _) = self._action_scores(ar_sent, en_sent)
-        log_ar_mask = torch.where(
-            ar_sent == self.ar_pad,
-            torch.full_like(ar_sent, MINF, dtype=torch.float),
-            torch.zeros_like(ar_sent, dtype=torch.float))
+        tgt_sent = torch.tensor([[self.tgt_bos]] * batch_size).to(self.device)
+        (src_len, _, feature_table,
+         action_scores, _, _) = self._action_scores(src_sent, tgt_sent)
+        log_src_mask = torch.where(
+            src_sent == self.src_pad,
+            torch.full_like(src_sent, MINF, dtype=torch.float),
+            torch.zeros_like(src_sent, dtype=torch.float))
 
         # special case, v = 0
-        alpha = torch.full((batch_size, ar_len, 1), MINF).to(self.device)
-        for t, ar_char in enumerate(ar_sent.transpose(0, 1)):
+        alpha = torch.full((batch_size, src_len, 1), MINF).to(self.device)
+        for t, src_char in enumerate(src_sent.transpose(0, 1)):
             if t == 0:
-                alpha[:, :, 0] = log_ar_mask
+                alpha[:, :, 0] = log_src_mask
                 continue
-            deletion_id = self._deletion_id(ar_char)
+            deletion_id = self._deletion_id(src_char)
             alpha[:, t, 0] = (
                 action_scores[b_range, t, 0, deletion_id] + alpha[:, t - 1, 0])
 
         finished = torch.full(
             [batch_size], False, dtype=torch.bool).to(self.device)
-        for v in range(1, 2 * ar_sent.size(1)):
+        for v in range(1, 2 * src_sent.size(1)):
 
             next_symb_scores = self._scores_for_next_step(
-                b_range, v, feature_table, log_ar_mask, alpha)
+                b_range, v, feature_table, log_src_mask, alpha)
 
             next_symbol_candidate = next_symb_scores.argmax(2)
             next_symbol = torch.where(
                 finished.unsqueeze(1),
-                torch.full_like(next_symbol_candidate, self.en_pad),
+                torch.full_like(next_symbol_candidate, self.tgt_pad),
                 next_symbol_candidate)
 
-            en_sent = torch.cat((en_sent, next_symbol), dim=1)
+            tgt_sent = torch.cat((tgt_sent, next_symbol), dim=1)
 
-            (ar_len, en_len, feature_table,
+            (src_len, tgt_len, feature_table,
                     action_scores, _, _) = self._action_scores(
-                ar_sent, en_sent)
-            finished += next_symbol.squeeze(1) == self.en_eos
+                src_sent, tgt_sent)
+            finished += next_symbol.squeeze(1) == self.tgt_eos
 
             alpha = self. _update_alpha_with_new_row(
                 batch_size, b_range, v, alpha, action_scores,
-                ar_sent, en_sent, ar_len)
+                src_sent, tgt_sent, src_len)
 
             # expand the target sequence
             if torch.all(finished):
                 break
 
-        return en_sent
+        return tgt_sent
 
     @torch.no_grad()
-    def beam_search(self, ar_sent, beam_size=10):
-        batch_size = ar_sent.size(0)
+    def beam_search(self, src_sent, beam_size=10):
+        batch_size = src_sent.size(0)
         b_range = torch.arange(batch_size)
 
-        log_ar_mask = torch.where(
-            ar_sent == self.ar_pad,
-            torch.full_like(ar_sent, MINF, dtype=torch.float),
-            torch.zeros_like(ar_sent, dtype=torch.float))
+        log_src_mask = torch.where(
+            src_sent == self.src_pad,
+            torch.full_like(src_sent, MINF, dtype=torch.float),
+            torch.zeros_like(src_sent, dtype=torch.float))
 
         # special case, v = 0 - intitialize first row of alpha table
         decoded = torch.full(
-            (batch_size, 1, 1), self.en_bos, dtype=torch.long).to(self.device)
-        (ar_len, _, feature_table,
+            (batch_size, 1, 1), self.tgt_bos, dtype=torch.long).to(self.device)
+        (src_len, _, feature_table,
          action_scores, _, _) = self._action_scores(
-            ar_sent, decoded.squeeze(1))
+            src_sent, decoded.squeeze(1))
 
-        alpha = torch.full((batch_size, 1, ar_len, 1), MINF).to(self.device)
-        for t, ar_char in enumerate(ar_sent.transpose(0, 1)):
+        alpha = torch.full((batch_size, 1, src_len, 1), MINF).to(self.device)
+        for t, src_char in enumerate(src_sent.transpose(0, 1)):
             if t == 0:
-                alpha[:, 0, :, 0] = log_ar_mask
+                alpha[:, 0, :, 0] = log_src_mask
                 continue
-            deletion_id = self._deletion_id(ar_char)
+            deletion_id = self._deletion_id(src_char)
             alpha[:, 0, t, 0] = (
                 action_scores[b_range, t, 0, deletion_id]
                 + alpha[:, 0, t - 1, 0])
@@ -812,10 +830,10 @@ class EditDistNeuralModelProgressive(NeuralEditDistBase):
 
         flat_decoded = decoded.reshape(batch_size, cur_len)
         flat_finished = finished.reshape(batch_size, cur_len)
-        flat_alpha = alpha.reshape(batch_size, ar_len, 1)
-        while cur_len < 2 * ar_len:
+        flat_alpha = alpha.reshape(batch_size, src_len, 1)
+        while cur_len < 2 * src_len:
             next_symb_scores = self._scores_for_next_step(
-                b_range, cur_len, feature_table, log_ar_mask, flat_alpha)
+                b_range, cur_len, feature_table, log_src_mask, flat_alpha)
 
             # get scores of all expanded hypotheses
             candidate_scores = (
@@ -827,8 +845,8 @@ class EditDistNeuralModelProgressive(NeuralEditDistBase):
             # reshape for beam members and get top k
             best_scores, best_indices = normed_scores.reshape(
                 batch_size, -1).topk(beam_size, dim=-1)
-            next_symbol_ids = best_indices % self.en_symbol_count
-            hypothesis_ids = best_indices // self.en_symbol_count
+            next_symbol_ids = best_indices % self.tgt_symbol_count
+            hypothesis_ids = best_indices // self.tgt_symbol_count
 
             # numbering elements in the extended batch, i.e. beam size copies
             # of each batch element
@@ -846,7 +864,7 @@ class EditDistNeuralModelProgressive(NeuralEditDistBase):
             reordered_finished = flat_finished.index_select(
                 0, global_best_indices)
             finished_now = (
-                next_symbol_ids.view(-1, 1) == self.en_eos
+                next_symbol_ids.view(-1, 1) == self.tgt_eos
                 + reordered_finished[:, -1:])
             finished = torch.cat((
                 reordered_finished,
@@ -861,21 +879,21 @@ class EditDistNeuralModelProgressive(NeuralEditDistBase):
 
             # tile encoder after first step
             if cur_len == 1:
-                ar_sent = ar_sent.unsqueeze(1).repeat(
+                src_sent = src_sent.unsqueeze(1).repeat(
                     1, beam_size, 1).reshape(batch_size * beam_size, -1)
-                log_ar_mask = log_ar_mask.unsqueeze(1).repeat(
+                log_src_mask = log_src_mask.unsqueeze(1).repeat(
                     1, beam_size, 1).reshape(batch_size * beam_size, -1)
                 b_range = torch.arange(batch_size * beam_size).to(self.device)
 
             # prepare feature and alpha for the next step
             flat_decoded = decoded.reshape(-1, cur_len + 1)
             flat_finished = finished.reshape(-1, cur_len + 1)
-            (ar_len, _, feature_table,
+            (src_len, _, feature_table,
                 action_scores, _, _) = self._action_scores(
-                    ar_sent, flat_decoded)
+                    src_sent, flat_decoded)
             flat_alpha = self. _update_alpha_with_new_row(
                 flat_decoded.size(0), b_range, cur_len, flat_alpha,
-                action_scores, ar_sent, flat_decoded, ar_len)
+                action_scores, src_sent, flat_decoded, src_len)
 
             # in the first iteration, beam size is 1, in the later ones,
             # it is the real beam size
@@ -885,7 +903,7 @@ class EditDistNeuralModelProgressive(NeuralEditDistBase):
         return decoded[:, 0]
 
     @torch.no_grad()
-    def operation_decoding(self, ar_sent):
+    def operation_decoding(self, src_sent):
         """Decode sequeence by operation sampling.
 
         Instead of sampling from symbol distributions, it samples directly
@@ -898,24 +916,24 @@ class EditDistNeuralModelProgressive(NeuralEditDistBase):
             Decoded target string.
 
         """
-        if ar_sent.size(0) != 1:
+        if src_sent.size(0) != 1:
             raise ValueError("Only works with batch size 1.")
 
-        en_sent = torch.tensor([[self.en_bos]]).to(self.device)
-        (ar_len, _, feature_table, _, _, _) = self._action_scores(
-            ar_sent, en_sent)
+        tgt_sent = torch.tensor([[self.tgt_bos]]).to(self.device)
+        (src_len, _, feature_table, _, _, _) = self._action_scores(
+            src_sent, tgt_sent)
 
         v = 0
         t = 0
-        for _ in range(1, 2 * ar_sent.size(1)):
+        for _ in range(1, 2 * src_sent.size(1)):
             state = feature_table[0, t, v]
 
-            if t >= ar_len - 1:
+            if t >= src_len - 1:
                 deletion_score = MINF.unsqueeze(0).to(self.device)
             else:
                 deletion_score = self.deletion_logit_proj(state)
             insertion_scores = self.insertion_proj(state)
-            if t >= ar_len - 1:
+            if t >= src_len - 1:
                 subs_scores = torch.full_like(insertion_scores, MINF)
             else:
                 subs_scores = self.substitution_proj(state)
@@ -930,23 +948,23 @@ class EditDistNeuralModelProgressive(NeuralEditDistBase):
                 continue
 
             # We are adding a new symbol => increase target sequnece index
-            next_symbol = (best_operation - 1) % self.en_symbol_count
+            next_symbol = (best_operation - 1) % self.tgt_symbol_count
             v += 1
 
-            if best_operation > self.en_symbol_count:
+            if best_operation > self.tgt_symbol_count:
                 t += 1
 
-            en_sent = torch.cat((
-                en_sent, next_symbol.unsqueeze(0).unsqueeze(0)), dim=1)
+            tgt_sent = torch.cat((
+                tgt_sent, next_symbol.unsqueeze(0).unsqueeze(0)), dim=1)
 
-            (ar_len, _, feature_table, _, _, _) = self._action_scores(
-                ar_sent, en_sent)
-            if next_symbol == self.en_eos:
+            (src_len, _, feature_table, _, _, _) = self._action_scores(
+                src_sent, tgt_sent)
+            if next_symbol == self.tgt_eos:
                 break
-        return en_sent
+        return tgt_sent
 
     @torch.no_grad()
-    def operation_beam_search(self, ar_sent, beam_size):
+    def operation_beam_search(self, src_sent, beam_size):
         """Decode sequeence by operation sampling.
 
         Instead of sampling from symbol distributions, it samples directly
@@ -958,33 +976,33 @@ class EditDistNeuralModelProgressive(NeuralEditDistBase):
         Returns:
             Decoded target string.
         """
-        if ar_sent.size(0) != 1:
+        if src_sent.size(0) != 1:
             raise ValueError("Only works with batch size 1.")
 
         # State is a tuple: target sequence, t, v, finished, score
-        beam = [(torch.tensor([[self.en_bos]]).to(self.device), 0, 0, False, 0)]
+        beam = [(torch.tensor([[self.tgt_bos]]).to(self.device), 0, 0, False, 0)]
         next_candidates = []
 
         def score_fn(hypothesis):
             _, _, tgt_pos, _, score_sum = hypothesis
             return score_sum / (tgt_pos + 1)
 
-        for _ in range(1, 2 * ar_sent.size(1)):
-            for en_sent, t, v, finished, score in beam:
+        for _ in range(1, 2 * src_sent.size(1)):
+            for tgt_sent, t, v, finished, score in beam:
                 if finished:
-                    next_candidates.append((en_sent, t, v, finished, score))
+                    next_candidates.append((tgt_sent, t, v, finished, score))
                     continue
 
-                (ar_len, _, feature_table, _, _, _) = self._action_scores(
-                    ar_sent, en_sent)
+                (src_len, _, feature_table, _, _, _) = self._action_scores(
+                    src_sent, tgt_sent)
                 state = feature_table[0, t, v]
 
-                if t >= ar_len - 1:
+                if t >= src_len - 1:
                     deletion_score = MINF.unsqueeze(0).to(self.device)
                 else:
                     deletion_score = self.deletion_logit_proj(state)
                 insertion_scores = self.insertion_proj(state)
-                if t >= ar_len - 1:
+                if t >= src_len - 1:
                     subs_scores = torch.full_like(insertion_scores, MINF)
                 else:
                     subs_scores = self.substitution_proj(state)
@@ -998,19 +1016,19 @@ class EditDistNeuralModelProgressive(NeuralEditDistBase):
                     # Delete source symbol and move in the source sequence
                     if op_idx == 0:
                         next_candidates.append((
-                            en_sent, t + 1, v, False, score + op_score))
+                            tgt_sent, t + 1, v, False, score + op_score))
                         continue
 
                     # Adding a new symbol => increase target sequnece index
-                    next_symbol = (op_idx - 1) % self.en_symbol_count
-                    new_en_sent = torch.cat((
-                        en_sent, next_symbol.unsqueeze(0).unsqueeze(0)), dim=1)
+                    next_symbol = (op_idx - 1) % self.tgt_symbol_count
+                    new_tgt_sent = torch.cat((
+                        tgt_sent, next_symbol.unsqueeze(0).unsqueeze(0)), dim=1)
 
                     next_candidates.append((
-                        new_en_sent,
-                        t + (op_idx > self.en_symbol_count),
+                        new_tgt_sent,
+                        t + (op_idx > self.tgt_symbol_count),
                         v + 1,
-                        next_symbol == self.en_eos,
+                        next_symbol == self.tgt_eos,
                         score + op_score))
 
             beam = heapq.nlargest(
