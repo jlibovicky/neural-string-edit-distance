@@ -15,7 +15,7 @@ from transliteration_utils import decode_ids
 def main():
     parser = argparse.ArgumentParser(__doc__)
     parser.add_argument("data_prefix", type=str)
-    parser.add_argument("--epochs", type=int, default=1)
+    parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument(
         "--src-tokenized", default=False, action="store_true",
         help="If true, source side are space separated tokens.")
@@ -26,8 +26,10 @@ def main():
         "--patience", default=10, type=int,
         help="Early stopping patience.")
     parser.add_argument(
-        "--learning-rate", default=0.1, type=float,
+        "--learning-rate", default=0.01, type=float,
         help="Learning rate.")
+    parser.add_argument("--log-directory", default="experiments", type=str,
+                        help="Number of steps between validations.")
     args = parser.parse_args()
 
     experiment_params = (
@@ -37,6 +39,7 @@ def main():
         f"_learning_rate_{args.learning_rate}" +
         f"_patience{args.patience}")
     experiment_dir = experiment_logging(
+        args.log_directory,
         f"edit_stat_{experiment_params}_{get_timestamp()}", args)
     model_path = os.path.join(experiment_dir, "model.pt")
 
@@ -52,8 +55,9 @@ def main():
         validation='eval.txt', test='test.txt', format='tsv',
         fields=[('ar', src_text_field), ('en', tgt_text_field)])
 
-    src_text_field.build_vocab(train_data)
-    tgt_text_field.build_vocab(train_data)
+    # Use val data beacuse iterating through train data would take agas.
+    src_text_field.build_vocab(val_data)
+    tgt_text_field.build_vocab(val_data)
 
     save_vocab(
         src_text_field.vocab.itos, os.path.join(experiment_dir, "src_vocab"))

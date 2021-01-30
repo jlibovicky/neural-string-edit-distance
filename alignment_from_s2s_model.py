@@ -6,13 +6,21 @@
 import argparse
 import logging
 import sys
+from typing import Dict, List
 
 import torch
 
-from train_transliteration_s2s import Seq2SeqModel
 from transliteration_utils import load_vocab
 
 logging.basicConfig(format='%(asctime)s %(message)s', level=logging.INFO)
+
+
+def preprocess_input(
+        string: str, tokenized: bool, stoi: Dict[str, int]) -> List[int]:
+    string_tok = (
+        ["<s>"] + (string.split() if tokenized else list(string)) + ["</s>"])
+    string_idx = [stoi[s] for s in string_tok]
+    return string_idx
 
 
 def main():
@@ -37,17 +45,9 @@ def main():
 
     for i, line in enumerate(args.input):
         string_1, string_2 = line.strip().split("\t")
-        string_1_tok = (
-            ["<s>"] +
-            (string_1.split() if args.src_tokenized else list(string_1)) +
-            ["</s>"])
-        string_2_tok = (
-            ["<s>"] +
-            (string_2.split() if args.tgt_tokenized else list(string_2)) +
-            ["</s>"])
 
-        string_1_idx = [src_stoi[s] for s in string_1_tok]
-        string_2_idx = [tgt_stoi[s] for s in string_2_tok]
+        string_1_idx = preprocess_input(string_1, args.src_tokenized, src_stoi)
+        string_2_idx = preprocess_input(string_2, args.tgt_tokenized, tgt_stoi)
 
         with torch.no_grad():
             _, attentions = model(

@@ -2,6 +2,7 @@
 
 import torch
 from torch import nn
+from torch.functional import F
 from transformers.modeling_bert import BertSelfAttention
 
 from rnn import AttConfig
@@ -29,7 +30,8 @@ class CNNEncoder(nn.Module):
         self.cnn_layer = None
         if layers > 0:
             self.cnn_layer = nn.Conv1d(
-                embedding_size, hidden_size, window, padding=(window - 1) // 2)
+                embedding_size, 2 * hidden_size,
+                window, padding=(window - 1) // 2)
             self.cnn_norm = nn.LayerNorm(hidden_size)
 
     def forward(self, input_sequence, attention_mask):
@@ -38,12 +40,12 @@ class CNNEncoder(nn.Module):
 
         output = (
             self.embeddings(input_sequence) + self.pos_embeddings(input_range))
-        output = self.embedd_norm(self.dropout(output))
+        prev_output = self.embedd_norm(self.dropout(output))
 
         if self.cnn_layer is not None:
-            output = output * attention_mask.float().unsqueeze(2)
-            output = self.cnn_layer(output.transpose(2, 1)).transpose(2, 1)
-            output = self.cnn_norm(self.dropout(output))
+            output = prev_output * attention_mask.float().unsqueeze(2)
+            output = F.glu(self.cnn_layer(output.transpose(2, 1)).transpose(2, 1))
+            output = self.cnn_norm(self.dropout(output) + prev_output)
 
         return output, None
 
@@ -73,11 +75,8 @@ class CNNDecoder(nn.Module):
 
         self.cnn_layer = None
         if layers > 0:
-            self.cnn_layer = nn.Sequential(
-                nn.Conv1d(embedding_size, hidden_size,
-                          window, padding=window - 1),
-                nn.ReLU(),
-                nn.Dropout(dropout))
+            self.cnn_layer = nn.Conv1d(embedding_size, 2 * hidden_size,
+                  window, padding=window - 1)
             self.cnn_norm = nn.LayerNorm(hidden_size)
 
         self.att = BertSelfAttention(
@@ -95,10 +94,10 @@ class CNNDecoder(nn.Module):
 
         if self.cnn_layer is not None:
             cnn_output = output * attention_mask.float().unsqueeze(2)
-            cnn_output = self.cnn_layer(
+            cnn_output = F.glu(self.cnn_layer(
                 output.transpose(2, 1)).transpose(
-                    2, 1)[:, :input_sequence.size(1)]
-            output = self.cnn_norm(cnn_output + output)
+                    2, 1))[:, :input_sequence.size(1)]
+            output = self.cnn_norm(self.dropout(cnn_output) + output)
 
         if encoder_hidden_states is not None:
             unsq_enc_att_mask = (

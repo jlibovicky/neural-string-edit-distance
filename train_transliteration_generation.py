@@ -50,7 +50,7 @@ def main():
     parser.add_argument("--patience", default=2, type=int,
                         help="Number of validations witout improvement before "
                              "decreasing the learning rate.")
-    parser.add_argument("--lr-decrease-count", default=10, type=int,
+    parser.add_argument("--lr-decrease-count", default=5, type=int,
                         help="Number learning rate decays before "
                              "early stopping.")
     parser.add_argument("--lr-decrease-ratio", default=0.7, type=float,

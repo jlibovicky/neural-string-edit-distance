@@ -74,9 +74,11 @@ def main():
         if i < 10:
             logging.info("'%s' -> '%s' (%s)", src, hyp_str, tgt)
 
-    logging.info("WER: %.3f", 1 - correct / total)
+    wer = 1 - correct / total
+    logging.info("WER: %.3f", wer)
     cer = char_error_rate(hypotheses, references, tokenized=args.tgt_tokenized)
     logging.info("CER: %.3f", cer)
+    print(cer, wer)
 
 if __name__ == "__main__":
     main()

@@ -34,7 +34,7 @@ class EditDistStatModel(EditDistBase):
 
 
     def _forward_evaluation(self, src_sent, tgt_sent):
-        src_len, tgt_len = ar_sent.size(1), tgt_sent.size(1)
+        src_len, tgt_len = src_sent.size(1), tgt_sent.size(1)
         alpha = torch.zeros((src_len, tgt_len)) + MINF
         alpha[0, 0] = 0
         for t, src_char in enumerate(src_sent[0]):
@@ -59,7 +59,7 @@ class EditDistStatModel(EditDistBase):
         return alpha
 
     def forward(self, src_sent, tgt_sent):
-        src_len, tgt_len = ar_sent.size(1), tgt_sent.size(1)
+        src_len, tgt_len = src_sent.size(1), tgt_sent.size(1)
         table_shape = ((src_len, tgt_len, self.n_target_classes))
 
         alpha = self._forward_evaluation(src_sent, tgt_sent)
@@ -119,7 +119,7 @@ class EditDistStatModel(EditDistBase):
         return expected_counts
 
     def viterbi(self, src_sent, tgt_sent):
-        src_len, tgt_len = ar_sent.size(1), tgt_sent.size(1)
+        src_len, tgt_len = src_sent.size(1), tgt_sent.size(1)
 
         action_count = torch.zeros((src_len, tgt_len))
         alpha = torch.zeros((src_len, tgt_len)) - MINF
@@ -176,13 +176,14 @@ class EditDistStatModel(EditDistBase):
         for _ in range(samples):
             tgt_sent = []
             src_pos = 1
-            src_char = ar_sent[0, ar_pos]
+            src_char = src_sent[0, src_pos]
 
+            op_count = 0
             for _ in range(max_len):
-                if src_pos == ar_sent.size(1) - 1:
+                if src_pos == src_sent.size(1) - 1:
                     break
 
-                src_char = ar_sent[0, ar_pos]
+                src_char = src_sent[0, src_pos]
                 insert_weights = [
                     self.weights[self._insertion_id(i)]
                     for i in range(self.tgt_symbol_count)]
@@ -193,20 +194,32 @@ class EditDistStatModel(EditDistBase):
 
                 distr = torch.tensor(insert_weights + substitute_weight + delete_weight).exp()
                 distr /= distr.sum()
-                next_op = torch.multinomial(distr, 1)[0]
+
+                next_symb = self.tgt_pad
+                while next_symb in [self.tgt_pad, self.tgt_bos, self.tgt_vocab["<unk>"]]:
+                    next_op = torch.multinomial(distr, 1)[0]
+                    # If it is delete, we are done
+                    if next_op == 2 * self.tgt_symbol_count:
+                        break
+                    # Tgt symbol candidate
+                    next_symb = next_op % self.tgt_symbol_count
+                op_count += 1
 
                 if next_op == 2 * self.tgt_symbol_count:
                     src_pos += 1 # DELETE OP
                     continue
 
-                tgt_sent.append(next_op % self.en_symbol_count)
+                if next_symb == self.tgt_eos:
+                    break
+                tgt_sent.append(next_op % self.tgt_symbol_count)
                 if next_op > self.tgt_symbol_count:
                     src_pos += 1 # IT WAS A SUBSTITUTION
 
             if not tgt_sent:
                 continue
 
-            score = self._forward_evaluation(src_sent, torch.tensor([tgt_sent]))[-1, -1]
+            score = self._forward_evaluation(
+                src_sent, torch.tensor([tgt_sent]))[-1, -1]# / op_count
             if score > best_tgt_sent_score:
                 best_tgt_sent_score = score
                 best_tgt_sent = tgt_sent
