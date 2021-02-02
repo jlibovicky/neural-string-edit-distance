@@ -135,3 +135,6 @@ data/
 experiments/
 cpu-env/
 gpu-env/
+unused/
+alignment/eflomal
+alignment/fast_align

@@ -1,5 +1,5 @@
-torch
-torchtext
+torch==1.6.0
+torchtext==0.7.0
 transformers==2.5.1
 editdistance
 termcolor
