@@ -16,7 +16,7 @@ class CNNEncoder(nn.Module):
     """
     def __init__(self, vocab, hidden_size, embedding_size, layers=0,
                  window=3, dropout=0.1):
-        super(CNNEncoder, self).__init__()
+        super().__init__()
 
         if window % 2 == 0:
             raise ValueError("Only even window sizes are allowed.")
@@ -44,7 +44,8 @@ class CNNEncoder(nn.Module):
 
         if self.cnn_layer is not None:
             output = prev_output * attention_mask.float().unsqueeze(2)
-            output = F.glu(self.cnn_layer(output.transpose(2, 1)).transpose(2, 1))
+            output = F.glu(
+                self.cnn_layer(output.transpose(2, 1)).transpose(2, 1))
             output = self.cnn_norm(self.dropout(output) + prev_output)
 
         return output, None
@@ -60,7 +61,7 @@ class CNNDecoder(nn.Module):
     def __init__(self, vocab, hidden_size, embedding_size, layers=0, window=3,
                  use_attention=False, attention_heads=8, dropout=0.1,
                  output_proj=False):
-        super(CNNDecoder, self).__init__()
+        super().__init__()
 
         if window % 2 == 0:
             raise ValueError("Only even window sizes are allowed.")
@@ -70,6 +71,7 @@ class CNNDecoder(nn.Module):
         self.embeddings = nn.Embedding(len(vocab), embedding_size)
         self.pos_embeddings = nn.Embedding(512, embedding_size)
         self.dropout = nn.Dropout(dropout)
+        self.use_attention = use_attention
 
         self.embedd_norm = nn.LayerNorm(embedding_size)
 
@@ -79,9 +81,10 @@ class CNNDecoder(nn.Module):
                   window, padding=window - 1)
             self.cnn_norm = nn.LayerNorm(hidden_size)
 
-        self.att = BertSelfAttention(
-            AttConfig(hidden_size, attention_heads, False, 0.1))
-        self.att_norm = nn.LayerNorm(hidden_size)
+        if use_attention:
+            self.att = BertSelfAttention(
+                AttConfig(hidden_size, attention_heads, True, dropout))
+            self.att_norm = nn.LayerNorm(hidden_size)
 
     def forward(self, input_sequence, attention_mask,
                 encoder_hidden_states=None, encoder_attention_mask=None):
@@ -99,12 +102,14 @@ class CNNDecoder(nn.Module):
                     2, 1))[:, :input_sequence.size(1)]
             output = self.cnn_norm(self.dropout(cnn_output) + output)
 
-        if encoder_hidden_states is not None:
+        attentions = []
+        if self.use_attention and encoder_hidden_states is not None:
             unsq_enc_att_mask = (
                 encoder_attention_mask.unsqueeze(1).unsqueeze(1))
-            context = self.att(
+            context, att_dist = self.att(
                 output, encoder_hidden_states=encoder_hidden_states,
-                encoder_attention_mask=unsq_enc_att_mask)[0]
+                encoder_attention_mask=unsq_enc_att_mask)
+            attentions.append(att_dist)
             output = self.att_norm(output + self.dropout(context))
 
-        return output, None
+        return output, None, attentions

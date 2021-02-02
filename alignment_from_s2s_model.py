@@ -51,8 +51,10 @@ def main():
 
         with torch.no_grad():
             _, attentions = model(
+                # pylint: disable=not-callable
                 torch.tensor([string_1_idx]).cuda(),
                 torch.tensor([string_2_idx]).cuda())
+                # pylint: enable=not-callable
 
         links = []
         soft_alignment = attentions[0, :-1, 1:-1].t()

@@ -17,6 +17,7 @@ from torch.functional import F
 from transformers import BertConfig, BertModel
 
 from experiment import experiment_logging, get_timestamp, save_vocab
+from cnn import CNNEncoder, CNNDecoder
 from rnn import RNNEncoder, RNNDecoder
 from transliteration_utils import (
     load_transliteration_data, decode_ids, char_error_rate)
@@ -31,7 +32,7 @@ class Seq2SeqModel(nn.Module):
         self.encoder = encoder
         self.decoder = decoder
 
-        if isinstance(decoder, RNNDecoder):
+        if isinstance(decoder, RNNDecoder) or isinstance(decoder, CNNDecoder):
             self.transposed_embeddings = decoder.embeddings.weight.t()
         else:
             self.transposed_embeddings = \
@@ -190,10 +191,12 @@ def main():
     parser.add_argument("data_prefix", type=str)
     parser.add_argument("--epochs", default=100, type=int)
     parser.add_argument("--model-type", default='transformer',
-                        choices=["transformer", "rnn"])
+                        choices=["transformer", "rnn", "cnn"])
     parser.add_argument("--hidden-size", default=256, type=int)
     parser.add_argument("--attention-heads", default=4, type=int)
     parser.add_argument("--layers", default=2, type=int)
+    parser.add_argument("--window", default=3, type=int,
+                        help="CNN window width.")
     parser.add_argument("--batch-size", default=512, type=int)
     parser.add_argument(
         "--src-tokenized", default=False, action="store_true",
@@ -264,6 +267,15 @@ def main():
             tgt_text_field.vocab, args.hidden_size, args.hidden_size,
             args.layers, attention_heads=args.attention_heads,
             dropout=0.1, output_proj=True).to(device)
+    elif args.model_type == "cnn":
+        encoder = CNNEncoder(
+            src_text_field.vocab, args.hidden_size, args.hidden_size,
+            layers=args.layers, window=args.window, dropout=0.1).to(device)
+        decoder = CNNDecoder(
+            tgt_text_field.vocab, args.hidden_size, args.hidden_size,
+            layers=args.layers, window=args.window,
+            attention_heads=args.attention_heads,
+            dropout=0.1, use_attention=True).to(device)
     else:
         raise RuntimeError("Unknown model type.")
 

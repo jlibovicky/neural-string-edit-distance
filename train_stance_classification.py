@@ -50,7 +50,6 @@ def eval_model(encoder, model, data_iter, threshold, device):
             pos_scores_sum += (batch.label * scores).sum()
             neg_scores_sum += ((1 - batch.label) * scores).sum()
 
-
             model_positives = (scores > threshold).long()
             true_positives += (
                 batch.label * model_positives).sum()
@@ -83,6 +82,8 @@ def main():
     parser.add_argument("--hidden-size", default=256, type=int)
     parser.add_argument("--attention-heads", default=8, type=int)
     parser.add_argument("--layers", default=4, type=int)
+    parser.add_argument("--window", default=3, type=int,
+                        help="CNN window width.")
     parser.add_argument("--batch-size", default=512, type=int)
     parser.add_argument("--delay-update", default=1, type=int,
                         help="Update model every N steps.")
@@ -165,6 +166,10 @@ def main():
         encoder = CNNEncoder(
             text_field.vocab, args.hidden_size,
             args.hidden_size, window=1, layers=0, dropout=0.1)
+    elif args.model_type == "cnn":
+        encoder = CNNEncoder(
+            text_field.vocab, args.hidden_size,
+            args.hidden_size, window=args.window, layers=args.layers, dropout=0.1)
     else:
         raise ValueError("Uknown uncoder type.")
 
