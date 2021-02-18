@@ -10,6 +10,7 @@ from typing import Dict, List
 
 import torch
 
+from train_transliteration_s2s import Seq2SeqModel
 from transliteration_utils import load_vocab
 
 logging.basicConfig(format='%(asctime)s %(message)s', level=logging.INFO)

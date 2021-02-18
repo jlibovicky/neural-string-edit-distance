@@ -795,7 +795,7 @@ class EditDistNeuralModelProgressive(NeuralEditDistBase):
         return tgt_sent
 
     @torch.no_grad()
-    def beam_search(self, src_sent, beam_size=10):
+    def beam_search(self, src_sent, beam_size=10, len_norm=1.0):
         batch_size = src_sent.size(0)
         b_range = torch.arange(batch_size)
 
@@ -839,11 +839,12 @@ class EditDistNeuralModelProgressive(NeuralEditDistBase):
             candidate_scores = (
                 scores.unsqueeze(2) +
                 next_symb_scores.reshape(batch_size, current_beam, -1))
-            normed_scores = (
-                candidate_scores / ((1 - finished.float()).sum(2, keepdim=True) + 1))
+            norm_factor = torch.pow(
+                (1 - finished.float()).sum(2, keepdim=True) + 1, len_norm)
+            normed_scores = candidate_scores / norm_factor
 
             # reshape for beam members and get top k
-            best_scores, best_indices = normed_scores.reshape(
+            _, best_indices = normed_scores.reshape(
                 batch_size, -1).topk(beam_size, dim=-1)
             next_symbol_ids = best_indices % self.tgt_symbol_count
             hypothesis_ids = best_indices // self.tgt_symbol_count
@@ -864,12 +865,15 @@ class EditDistNeuralModelProgressive(NeuralEditDistBase):
             reordered_finished = flat_finished.index_select(
                 0, global_best_indices)
             finished_now = (
-                next_symbol_ids.view(-1, 1) == self.tgt_eos
+                (next_symbol_ids.view(-1, 1) == self.tgt_eos)
                 + reordered_finished[:, -1:])
             finished = torch.cat((
                 reordered_finished,
                 finished_now), dim=1).reshape(batch_size, beam_size, -1)
             flat_alpha = flat_alpha.index_select(0, global_best_indices)
+
+            if finished_now.all():
+                break
 
             # re-order scores
             scores = candidate_scores.reshape(

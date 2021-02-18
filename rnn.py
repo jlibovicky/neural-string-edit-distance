@@ -157,9 +157,11 @@ class RNNDecoder(nn.Module):
         if encoder_hidden_states is not None:
             unsq_enc_att_mask = (
                 encoder_attention_mask.unsqueeze(1).unsqueeze(1))
-            context, att_dist = self.attn[0](
+            att_output = self.attn[0](
                 outputs, encoder_hidden_states=encoder_hidden_states,
                 encoder_attention_mask=unsq_enc_att_mask)
+            context = att_output[0]
+            att_dist = att_output[1] if len(att_output) > 1 else None
             outputs = self.ctx_norms[0](outputs + self.dropout(context))
             attentions.append((None, att_dist))
 
@@ -177,9 +179,11 @@ class RNNDecoder(nn.Module):
             if encoder_hidden_states is not None:
                 unsq_enc_att_mask = (
                     encoder_attention_mask.unsqueeze(1).unsqueeze(1))
-                context, att_dist = att(
+                att_output = att(
                     outputs, encoder_hidden_states=encoder_hidden_states,
                     encoder_attention_mask=unsq_enc_att_mask)
+                context = att_output[0]
+                att_dist = att_output[1] if len(att_output) > 1 else None
                 outputs = ctx_norm(outputs + self.dropout(context))
                 attentions.append((None, att_dist))
 

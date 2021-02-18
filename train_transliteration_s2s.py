@@ -61,7 +61,7 @@ class Seq2SeqModel(nn.Module):
             self.transposed_embeddings)
 
         attentions = sum(
-            att[1].mean(1) for att in decoder_output[2]) / len(
+            att.mean(1) for att in decoder_output[2]) / len(
                 decoder_output[2])
 
         return logits, attentions
@@ -100,7 +100,7 @@ class Seq2SeqModel(nn.Module):
                 torch.stack(finished, dim=1).logical_not())
 
     @torch.no_grad()
-    def beam_search(self, src_batch, beam_size=10, max_len=100):
+    def beam_search(self, src_batch, beam_size=10, max_len=100, len_norm=1.0):
         input_mask = src_batch != self.src_pad_token_id
         encoded = self.encoder(src_batch, attention_mask=input_mask)[0]
         batch_size = encoded.size(0)
@@ -133,9 +133,12 @@ class Seq2SeqModel(nn.Module):
             candidate_scores = (
                 scores.unsqueeze(2) +
                 next_token_logprobs.reshape(batch_size, current_beam, -1))
+            norm_factor = torch.pow(
+                (1 - finished.float()).sum(2, keepdim=True) + 1, len_norm)
+            normed_scores = candidate_scores / norm_factor
 
             # reshape for beam members and get top k
-            best_scores, best_indices = candidate_scores.reshape(
+            _, best_indices = normed_scores.reshape(
                 batch_size, -1).topk(beam_size, dim=-1)
             next_symbol_ids = best_indices % vocab_size
             hypothesis_ids = best_indices // vocab_size
@@ -156,18 +159,17 @@ class Seq2SeqModel(nn.Module):
             reordered_finished = flat_finished.index_select(
                 0, global_best_indices).reshape(batch_size, beam_size, -1)
             finished_now = (
-                next_symbol_ids == self.tgt_eos_token_id +
+                (next_symbol_ids == self.tgt_eos_token_id) +
                 reordered_finished[:, :, -1])
             finished = torch.cat((
                 reordered_finished,
                 finished_now.unsqueeze(-1)), dim=2)
+            if finished_now.all():
+                break
 
             # re-order scores
-            scores = best_scores
-            #scores = (
-            #    scores.reshape(
-            #        -1).index_select(0, global_best_indices).reshape(
-            #            batch_size, beam_size) + best_scores)
+            scores = candidate_scores.reshape(
+                batch_size, -1).gather(-1, best_indices)
 
             # tile encoder after first step
             if cur_len == 1:

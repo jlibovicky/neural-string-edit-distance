@@ -21,32 +21,39 @@ class CNNEncoder(nn.Module):
         if window % 2 == 0:
             raise ValueError("Only even window sizes are allowed.")
 
+        self.layers = layers
         self.embeddings = nn.Embedding(len(vocab), embedding_size)
         self.pos_embeddings = nn.Embedding(512, embedding_size)
         self.dropout = nn.Dropout(dropout)
 
         self.embedd_norm = nn.LayerNorm(embedding_size)
 
-        self.cnn_layer = None
         if layers > 0:
-            self.cnn_layer = nn.Conv1d(
-                embedding_size, 2 * hidden_size,
-                window, padding=(window - 1) // 2)
-            self.cnn_norm = nn.LayerNorm(hidden_size)
+            self.cnn_layers = nn.ModuleList()
+            self.cnn_norms = nn.ModuleList()
 
-    def forward(self, input_sequence, attention_mask):
+            for _ in range(layers):
+                self.cnn_layers.append(
+                    nn.Conv1d(embedding_size, 2 * hidden_size,
+                              window, padding=window - 1))
+                self.cnn_norms.append(nn.LayerNorm(hidden_size))
+
+    def forward(self, input_ids, attention_mask):
         input_range = torch.arange(
-            input_sequence.size(1)).unsqueeze(0).to(input_sequence.device)
+            input_ids.size(1)).unsqueeze(0).to(input_ids.device)
 
         output = (
-            self.embeddings(input_sequence) + self.pos_embeddings(input_range))
-        prev_output = self.embedd_norm(self.dropout(output))
+            self.embeddings(input_ids) + self.pos_embeddings(input_range))
+        output = self.embedd_norm(self.dropout(output))
 
-        if self.cnn_layer is not None:
-            output = prev_output * attention_mask.float().unsqueeze(2)
-            output = F.glu(
-                self.cnn_layer(output.transpose(2, 1)).transpose(2, 1))
-            output = self.cnn_norm(self.dropout(output) + prev_output)
+        # Backward compatibility of saved models
+        if hasattr(self, "layers"):
+            for i in range(self.layers):
+                cnn_output = output * attention_mask.float().unsqueeze(2)
+                cnn_output = F.glu(self.cnn_layers[i](
+                    output.transpose(2, 1)).transpose(
+                        2, 1))[:, :input_ids.size(1)]
+                output = self.cnn_norms[i](self.dropout(cnn_output) + output)
 
         return output, None
 
@@ -72,44 +79,60 @@ class CNNDecoder(nn.Module):
         self.pos_embeddings = nn.Embedding(512, embedding_size)
         self.dropout = nn.Dropout(dropout)
         self.use_attention = use_attention
+        self.layers = layers
 
         self.embedd_norm = nn.LayerNorm(embedding_size)
 
-        self.cnn_layer = None
         if layers > 0:
-            self.cnn_layer = nn.Conv1d(embedding_size, 2 * hidden_size,
-                  window, padding=window - 1)
-            self.cnn_norm = nn.LayerNorm(hidden_size)
+            self.cnn_layers = nn.ModuleList()
+            self.cnn_norms = nn.ModuleList()
+            self.atts = nn.ModuleList()
+            self.att_norms = nn.ModuleList()
 
-        if use_attention:
-            self.att = BertSelfAttention(
-                AttConfig(hidden_size, attention_heads, True, dropout))
-            self.att_norm = nn.LayerNorm(hidden_size)
+            for _ in range(layers):
 
-    def forward(self, input_sequence, attention_mask,
+                self.cnn_layers.append(
+                    nn.Conv1d(embedding_size, 2 * hidden_size,
+                              window, padding=window - 1))
+                self.cnn_norms.append(nn.LayerNorm(hidden_size))
+
+                if use_attention:
+                    self.atts.append(BertSelfAttention(
+                        AttConfig(hidden_size, attention_heads, True, dropout)))
+                    self.att_norms.append(nn.LayerNorm(hidden_size))
+
+    def forward(self, input_ids, attention_mask,
                 encoder_hidden_states=None, encoder_attention_mask=None):
         input_range = torch.arange(
-            input_sequence.size(1)).unsqueeze(0).to(input_sequence.device)
+            input_ids.size(1)).unsqueeze(0).to(input_ids.device)
 
         output = (
-            self.embeddings(input_sequence) + self.pos_embeddings(input_range))
+            self.embeddings(input_ids) + self.pos_embeddings(input_range))
         output = self.embedd_norm(self.dropout(output))
 
-        if self.cnn_layer is not None:
-            cnn_output = output * attention_mask.float().unsqueeze(2)
-            cnn_output = F.glu(self.cnn_layer(
-                output.transpose(2, 1)).transpose(
-                    2, 1))[:, :input_sequence.size(1)]
-            output = self.cnn_norm(self.dropout(cnn_output) + output)
-
         attentions = []
-        if self.use_attention and encoder_hidden_states is not None:
+        if hasattr(self, "layers"):
+            for i in range(self.layers):
+                cnn_output = output * attention_mask.float().unsqueeze(2)
+                cnn_output = F.glu(self.cnn_layers[i](
+                    output.transpose(2, 1)).transpose(
+                        2, 1))[:, :input_ids.size(1)]
+                output = self.cnn_norms[i](self.dropout(cnn_output) + output)
+
+                if self.use_attention and encoder_hidden_states is not None:
+                    unsq_enc_att_mask = (
+                        encoder_attention_mask.unsqueeze(1).unsqueeze(1))
+                    context, att_dist = self.atts[i](
+                        output, encoder_hidden_states=encoder_hidden_states,
+                        encoder_attention_mask=unsq_enc_att_mask)
+                    attentions.append(att_dist)
+                    output = self.att_norms[i](output + self.dropout(context))
+        elif encoder_hidden_states is not None:
             unsq_enc_att_mask = (
                 encoder_attention_mask.unsqueeze(1).unsqueeze(1))
-            context, att_dist = self.att(
+            context = self.att(
                 output, encoder_hidden_states=encoder_hidden_states,
-                encoder_attention_mask=unsq_enc_att_mask)
-            attentions.append(att_dist)
+                encoder_attention_mask=unsq_enc_att_mask)[0]
             output = self.att_norm(output + self.dropout(context))
 
         return output, None, attentions
