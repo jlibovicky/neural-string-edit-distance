@@ -104,8 +104,8 @@ def main():
     cer = char_error_rate(
         tgt_hypotheses, tgt_references, args.tgt_tokenized)
 
-    logging.info("WER: %.3g", wer)
-    logging.info("CER: %.3g", cer)
+    logging.info("WER: %.10g", wer)
+    logging.info("CER: %.10g", cer)
 
 
 if __name__ == "__main__":

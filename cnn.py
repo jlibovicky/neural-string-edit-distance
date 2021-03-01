@@ -54,6 +54,11 @@ class CNNEncoder(nn.Module):
                     output.transpose(2, 1)).transpose(
                         2, 1))[:, :input_ids.size(1)]
                 output = self.cnn_norms[i](self.dropout(cnn_output) + output)
+        else:
+            if self.cnn_layer is not None:
+                output = output * attention_mask.float().unsqueeze(2)
+                output = self.cnn_layer(output.transpose(2, 1)).transpose(2, 1)
+                output = self.cnn_norm(self.dropout(output))
 
         return output, None
 
@@ -127,12 +132,20 @@ class CNNDecoder(nn.Module):
                         encoder_attention_mask=unsq_enc_att_mask)
                     attentions.append(att_dist)
                     output = self.att_norms[i](output + self.dropout(context))
-        elif encoder_hidden_states is not None:
-            unsq_enc_att_mask = (
-                encoder_attention_mask.unsqueeze(1).unsqueeze(1))
-            context = self.att(
-                output, encoder_hidden_states=encoder_hidden_states,
-                encoder_attention_mask=unsq_enc_att_mask)[0]
-            output = self.att_norm(output + self.dropout(context))
+        else:
+            if self.cnn_layer is not None:
+                cnn_output = output * attention_mask.float().unsqueeze(2)
+                cnn_output = self.cnn_layer(
+                    output.transpose(2, 1)).transpose(
+                        2, 1)[:, :input_ids.size(1)]
+                output = self.cnn_norm(cnn_output + output)
+
+            if encoder_hidden_states is not None:
+                unsq_enc_att_mask = (
+                    encoder_attention_mask.unsqueeze(1).unsqueeze(1))
+                context = self.att(
+                    output, encoder_hidden_states=encoder_hidden_states,
+                    encoder_attention_mask=unsq_enc_att_mask)[0]
+                output = self.att_norm(output + self.dropout(context))
 
         return output, None, attentions
