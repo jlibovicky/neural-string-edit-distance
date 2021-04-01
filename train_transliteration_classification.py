@@ -35,6 +35,9 @@ def main():
                         help="Update model every N steps.")
     parser.add_argument("--epochs", default=10, type=int)
     parser.add_argument("--interpretation-loss", default=None, type=float)
+    parser.add_argument("--bce-loss", default=1.0, type=float)
+    parser.add_argument("--positive-example-loss", default=1.0, type=float)
+    parser.add_argument("--negative-example-loss", default=1.0, type=float)
     parser.add_argument("--src-tokenized", default=False, action="store_true",
                         help="If true, source side is space-separated.")
     parser.add_argument("--tgt-tokenized", default=False, action="store_true",
@@ -56,6 +59,9 @@ def main():
         f"_hidden{args.hidden_size}" +
         f"_attheads{args.attention_heads}" +
         f"_layers{args.layers}" +
+        f"_interpretationLoss{args.interpretation_loss}" +
+        f"_posLoss{args.positive_example_loss}" +
+        f"_negLoss{args.negative_example_loss}" +
         f"_interpretationLoss{args.interpretation_loss}" +
         f"_batch{args.batch_size}" +
         f"_patence{args.patience}")
@@ -152,7 +158,10 @@ def main():
                 (action_mask * pos_mask).reshape(-1) * pos_samples_loss).mean()
             neg_loss = (
                 (action_mask * neg_mask).reshape(-1) * neg_samples_loss).mean()
-            loss = pos_loss + neg_loss + bce_loss
+            loss = (
+                args.positive_example_loss * pos_loss +
+                args.negative_example_loss * neg_loss +
+                args.bce_loss * bce_loss)
 
             distortion_loss = 0
             if args.interpretation_loss is not None:
