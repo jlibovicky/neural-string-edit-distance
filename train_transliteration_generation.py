@@ -50,7 +50,7 @@ def main():
     parser.add_argument("--patience", default=2, type=int,
                         help="Number of validations witout improvement before "
                              "decreasing the learning rate.")
-    parser.add_argument("--lr-decrease-count", default=5, type=int,
+    parser.add_argument("--lr-decrease-count", default=6, type=int,
                         help="Number learning rate decays before "
                              "early stopping.")
     parser.add_argument("--lr-decrease-ratio", default=0.7, type=float,
@@ -61,6 +61,8 @@ def main():
                         help="Number of steps between validations.")
     parser.add_argument("--log-directory", default="experiments", type=str,
                         help="Number of steps between validations.")
+    parser.add_argument("--len-norm", default=0.0, type=float,
+                        help="Length normalization during decoding.")
     args = parser.parse_args()
 
     if (args.nll_loss is None and
@@ -238,7 +240,8 @@ def main():
 
                 for j, val_ex in enumerate(val_iter):
                     with torch.no_grad():
-                        decoded_val = model.decode(val_ex.ar)
+                        decoded_val = model.beam_search(
+                            val_ex.ar, beam_size=5, len_norm=args.len_norm)
 
                         for ar, en, hyp in zip(
                                 val_ex.ar, val_ex.en, decoded_val):
@@ -301,40 +304,40 @@ def main():
     model = torch.load(model_path)
     model.eval()
 
-    sources = []
-    ground_truth = []
-    hypotheses = []
+    for beam in range(1, 30):
+        sources = []
+        ground_truth = []
+        hypotheses = []
 
-    for j, test_ex in enumerate(test_iter):
-        with torch.no_grad():
-            decoded_val = model.beam_search(
-                test_ex.ar, beam_size=args.beam_size)
+        for j, test_ex in enumerate(test_iter):
+            with torch.no_grad():
+                decoded_val = model.beam_search(
+                    test_ex.ar, beam_size=beam)
+                for ar, en, hyp in zip(test_ex.ar, test_ex.en, decoded_val):
+                    src_string = decode_ids(ar, src_text_field, args.src_tokenized)
+                    tgt_string = decode_ids(en, tgt_text_field, args.tgt_tokenized)
+                    hypothesis = decode_ids(hyp, tgt_text_field, args.tgt_tokenized)
 
-            for ar, en, hyp in zip(test_ex.ar, test_ex.en, decoded_val):
-                src_string = decode_ids(ar, src_text_field, args.src_tokenized)
-                tgt_string = decode_ids(en, tgt_text_field, args.tgt_tokenized)
-                hypothesis = decode_ids(hyp, tgt_text_field, args.tgt_tokenized)
+                    sources.append(src_string)
+                    ground_truth.append(tgt_string)
+                    hypotheses.append(hypothesis)
 
-                sources.append(src_string)
-                ground_truth.append(tgt_string)
-                hypotheses.append(hypothesis)
+                if j == 0:
+                    for src, hyp, tgt in zip(
+                            sources[:10], hypotheses, ground_truth):
+                        logging.info("")
+                        logging.info("'%s' -> '%s' (%s)", src, hyp, tgt)
 
-            if j == 0:
-                for src, hyp, tgt in zip(
-                        sources[:10], hypotheses, ground_truth):
-                    logging.info("")
-                    logging.info("'%s' -> '%s' (%s)", src, hyp, tgt)
+        logging.info("")
 
-    logging.info("")
+        wer = 1 - sum(
+            float(gt == hyp) for gt, hyp
+            in zip(ground_truth, hypotheses)) / len(ground_truth)
+        cer = char_error_rate(hypotheses, ground_truth, args.tgt_tokenized)
 
-    wer = 1 - sum(
-        float(gt == hyp) for gt, hyp
-        in zip(ground_truth, hypotheses)) / len(ground_truth)
-    cer = char_error_rate(hypotheses, ground_truth, args.tgt_tokenized)
-
-    logging.info("WER: %.3g", wer)
-    logging.info("CER: %.3g", cer)
-    logging.info("")
+        logging.info("WER: %.3g", wer)
+        logging.info("CER: %.3g", cer)
+        logging.info("")
 
 
 if __name__ == "__main__":

@@ -1,17 +1,28 @@
 """Neural string edit distance."""
 
+from typing import List
+
 import heapq
+from collections import namedtuple
 
 import torch
 from torch import nn
 from torch.functional import F
+from torch import Tensor
 
 from transformers import BertConfig, BertModel
+from transformers.modeling_bert import BertSelfAttention
 
 from rnn import RNNEncoder, RNNDecoder
 from cnn import CNNEncoder, CNNDecoder
 
 MINF = torch.log(torch.tensor(0.))
+
+
+AttConfig = namedtuple(
+    "AttConfig",
+    ["hidden_size", "num_attention_heads", "output_attentions",
+     "attention_probs_dropout_prob"])
 
 
 class EditDistBase(nn.Module):
@@ -155,7 +166,11 @@ class NeuralEditDistBase(EditDistBase):
 
         self.encoder_decoder_attention = encoder_decoder_attention
 
-        proj_source = 2 * self.hidden_dim if self.directed else self.hidden_dim
+        proj_source = 4 * self.hidden_dim if self.directed else self.hidden_dim
+
+        if self.directed:
+            self.attention = BertSelfAttention(AttConfig(
+                self.hidden_dim, 4, True, 0.1))
 
         self.deletion_logit_proj = nn.Linear(
             proj_source, self.deletion_classes)
@@ -166,7 +181,6 @@ class NeuralEditDistBase(EditDistBase):
         self.extra_proj = nn.Linear(proj_source, self.extra_classes)
 
         self.distortion_mask = get_distortion_mask().to(device)
-
 
     def _encoder_for_vocab(self, vocab, directed=False):
         if self.model_type == "transformer":
@@ -241,14 +255,23 @@ class NeuralEditDistBase(EditDistBase):
         src_vectors = self._encode_src(src_sent, src_mask)
         tgt_vectors = self._encode_tgt(tgt_sent, tgt_mask, src_vectors, src_mask)
 
+        # TODO: do the sort of residual connection I had in Munich
         feature_table = self.projection(torch.cat((
             src_vectors.unsqueeze(2).repeat(1, 1, tgt_len, 1),
             tgt_vectors.unsqueeze(1).repeat(1, src_len, 1, 1)), dim=3))
 
         if self.directed:
+            unsq_enc_att_mask = (
+                src_mask.unsqueeze(1).unsqueeze(1))
+            att_output = self.attention(
+                tgt_vectors, encoder_hidden_states=src_vectors,
+                encoder_attention_mask=unsq_enc_att_mask)[0]
+
             feature_table = torch.cat(
-                (feature_table, tgt_vectors.unsqueeze(1).repeat(
-                    1, src_len, 1, 1)),
+                (feature_table,
+                 src_vectors.unsqueeze(2).repeat(1, 1, tgt_len, 1),
+                 tgt_vectors.unsqueeze(1).repeat(1, src_len, 1, 1),
+                 att_output.unsqueeze(1).repeat(1, src_len, 1, 1)),
                 dim=3)
 
         # DELETION <<<
@@ -297,9 +320,14 @@ class NeuralEditDistBase(EditDistBase):
                 valid_insertion_logits,
                 valid_subs_logits)
 
-    def _forward_evaluation(self, src_sent, tgt_sent, action_scores):
+    #@torch.jit.export
+    def _forward_evaluation(
+            self,
+            src_sent: Tensor,
+            tgt_sent: Tensor,
+            action_scores: Tensor):
         """Differentiable forward pass through the model. Algorithm 1."""
-        alpha = []
+        alpha: List[List[Tensor]] = []
         batch_size = src_sent.size(0)
         b_range = torch.arange(batch_size).to(self.device)
         for t, src_char in enumerate(src_sent.transpose(0, 1)):
@@ -340,9 +368,16 @@ class NeuralEditDistBase(EditDistBase):
             [torch.stack(v) for v in alpha]).permute(2, 0, 1)
         return alpha_tensor
 
+    #@torch.jit.script
     @torch.no_grad()
     def _backward_evalatuion_and_expectation(
-            self, src_len, tgt_len, src_sent, tgt_sent, alpha, action_scores):
+            self,
+            src_len: int,
+            tgt_len: int,
+            src_sent: Tensor,
+            tgt_sent: Tensor,
+            alpha: Tensor,
+            action_scores: Tensor):
         """The backward pass through the edit distance table. Algorithm 2.
 
         Unlike, the forward pass it does not have to be differentiable, because
