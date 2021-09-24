@@ -45,7 +45,7 @@ class RNNEncoder(nn.Module):
 
         word_embeddings = self.dropout(self.embeddings(input_sequence))
         packed_embeddings = nn.utils.rnn.pack_padded_sequence(
-            word_embeddings, input_lengths, batch_first=True,
+            word_embeddings, input_lengths.cpu(), batch_first=True,
             enforce_sorted=False)
 
         # Run the packed embeddings through the GRU, and then unpack the
@@ -59,7 +59,7 @@ class RNNEncoder(nn.Module):
 
         for gru, norm in zip(self.other_grus, self.norms[1:]):
             packed_outputs = nn.utils.rnn.pack_padded_sequence(
-                outputs, input_lengths, batch_first=True,
+                outputs, input_lengths.cpu(), batch_first=True,
                 enforce_sorted=False)
             next_outputs, _ = gru(packed_outputs)
             next_outputs, _ = nn.utils.rnn.pad_packed_sequence(
@@ -143,7 +143,7 @@ class RNNDecoder(nn.Module):
 
         word_embeddings = self.dropout(self.embeddings(input_ids))
         packed_embeddings = nn.utils.rnn.pack_padded_sequence(
-            word_embeddings, input_lengths, batch_first=True,
+            word_embeddings, input_lengths.cpu(), batch_first=True,
             enforce_sorted=False)
 
         # Run the packed embeddings through the GRU, and then unpack
@@ -169,7 +169,7 @@ class RNNDecoder(nn.Module):
                 self.other_grus, self.attn[1:],
                 self.rnn_norms[1:], self.ctx_norms[1:]):
             packed_outputs = nn.utils.rnn.pack_padded_sequence(
-                outputs, input_lengths, batch_first=True,
+                outputs, input_lengths.cpu(), batch_first=True,
                 enforce_sorted=False)
             next_outputs, _ = gru(packed_outputs)
             next_outputs, _ = nn.utils.rnn.pad_packed_sequence(
