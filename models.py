@@ -249,6 +249,15 @@ class NeuralEditDistBase(EditDistBase):
 
     def _target_class_ids(
             self, src_sent: Tensor, tgt_sent: Tensor):
+        """Output classes for input string pair.
+
+        This function computes what target classes correspond to deleting
+        source symbols, inserting target symbols and subsitituting source
+        symbols for target symbols. The vocabulary indices cannot be used
+        directly because they are different on source and target side and there
+        is a different number of possible edit operations than the vocabulary
+        sizes.
+        """
         all_deletion_ids = self._deletion_id(src_sent)
         all_insertion_ids = self._insertion_id(tgt_sent)
         all_subs_ids = self._substitute_id(
@@ -543,20 +552,7 @@ class EditDistNeuralModelProgressive(NeuralEditDistBase):
             start_symbol=start_symbol, end_symbol=end_symbol,
             pad_symbol=pad_symbol)
 
-    def _contrastive_prob(self, src_sent, tgt_sent):
-        tgt_sent = tgt_sent.flip(0)
-        b_range = torch.arange(src_sent.size(0))
-        src_lengths = (src_sent != self.src_pad).int().sum(1) - 1
-        tgt_lengths = (tgt_sent != self.tgt_pad).int().sum(1) - 1
-
-        _, _, _, action_scores, _, _ = self._action_scores(
-            src_sent, tgt_sent)
-
-        alpha = self._forward_evaluation(src_sent, tgt_sent, action_scores)
-
-        return alpha[b_range, src_lengths, tgt_lengths]
-
-    def forward(self, src_sent, tgt_sent, contrastive_probs=False):
+    def forward(self, src_sent, tgt_sent):
         b_range = torch.arange(src_sent.size(0))
         src_lengths = (src_sent != self.src_pad).int().sum(1) - 1
         tgt_lengths = (tgt_sent != self.tgt_pad).int().sum(1) - 1
@@ -592,14 +588,9 @@ class EditDistNeuralModelProgressive(NeuralEditDistBase):
         distorted_probs = self._alpha_distortion_penalty(
             src_len, tgt_len, alpha)
 
-        contrastive_alphas = None
-        if contrastive_probs:
-            contrastive_alphas = self._contrastive_prob(src_sent, tgt_sent)
-
         return (action_scores, torch.exp(expected_counts),
                 alpha[b_range, src_lengths, tgt_lengths],
-                next_symbol_logprobs, distorted_probs,
-                contrastive_alphas)
+                next_symbol_logprobs, distorted_probs)
 
     @torch.no_grad()
     def _scores_for_next_step(
