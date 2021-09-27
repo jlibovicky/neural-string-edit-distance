@@ -61,7 +61,7 @@ class Seq2SeqModel(nn.Module):
             self.transposed_embeddings)
 
         attentions = sum(
-            att.mean(1) for att in decoder_output[2]) / len(
+            att[1].mean(1) for att in decoder_output[2]) / len(
                 decoder_output[2])
 
         return logits, attentions
