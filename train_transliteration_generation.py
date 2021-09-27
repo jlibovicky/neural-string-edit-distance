@@ -9,6 +9,7 @@ tab-separated source and target strings.
 import argparse
 import logging
 import os
+import time
 
 from tensorboardX import SummaryWriter
 import torch
@@ -113,6 +114,9 @@ def main():
         attention_heads=args.attention_heads,
         window=args.window,
         encoder_decoder_attention=not args.no_enc_dec_att).to(device)
+    logging.info(
+        "Model parameters: %dk",
+        sum([x.reshape(-1).size(0) for x in model.parameters()]) / 1000)
 
     kl_div = nn.KLDivLoss(reduction='none').to(device)
     nll = nn.NLLLoss(reduction='none').to(device)
@@ -122,16 +126,23 @@ def main():
         model.parameters(), lr=args.learning_rate)
     logging.info("Model initialized.")
 
+    train_curve_file = open(
+        os.path.join(experiment_dir, "train_loss.tsv"), "w")
+    valid_curve_file = open(
+        os.path.join(experiment_dir, "valid_cer.tsv"), "w")
+
     step = 0
     best_wer = 1e9
     best_wer_step = 0
     best_cer = 1e9
     best_cer_step = 0
     stalled = 0
+    last_save_time = 0
     learning_rate = args.learning_rate
     remaining_decrease = args.lr_decrease_count
 
     logging.info("Start training.")
+    start_time = time.time()
     for _ in range(args.epochs):
         if remaining_decrease <= 0:
             break
@@ -220,6 +231,7 @@ def main():
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 optimizer.step()
                 optimizer.zero_grad()
+                print(f"{step:d}\t{nll_loss:.3g}", file=train_curve_file)
 
             if (step % (args.delay_update * args.validation_frequency) ==
                     args.delay_update * args.validation_frequency - 1):
@@ -237,7 +249,7 @@ def main():
                 for j, val_ex in enumerate(val_iter):
                     with torch.no_grad():
                         decoded_val = model.beam_search(
-                            val_ex.ar, beam_size=5, len_norm=args.len_norm)
+                            val_ex.ar, beam_size=3, len_norm=0.0)
 
                         for ar, en, hyp in zip(
                                 val_ex.ar, val_ex.en, decoded_val):
@@ -287,6 +299,9 @@ def main():
                     logging.info("Stalled %d times.", stalled)
                 else:
                     torch.save(model, model_path)
+                    last_save_time = time.time()
+
+                print(f"{step:d}\t{cer:.3g}", file=valid_curve_file)
 
                 logging.info("")
 
@@ -295,45 +310,99 @@ def main():
                 tb_writer.flush()
                 model.train()
 
-    logging.info("TRAINING FINISHED, evaluating on test data")
-    logging.info("")
+    logging.info("TRAINING FINISHED.")
+    logging.info(
+        "The training took %d seconds.", last_save_time - start_time)
+    logging.info("Find best beam serch parameters.")
+
+    train_curve_file.close()
+    valid_curve_file.close()
+
     model = torch.load(model_path)
     model.eval()
 
-    for beam in range(1, 30):
-        sources = []
-        ground_truth = []
-        hypotheses = []
+    best_eval_beam = 1
+    best_eval_len_norm = 0.0
+    best_eval_cer = 10.
 
-        for j, test_ex in enumerate(test_iter):
-            with torch.no_grad():
-                decoded_val = model.beam_search(
-                    test_ex.ar, beam_size=beam)
-                for ar, en, hyp in zip(test_ex.ar, test_ex.en, decoded_val):
-                    src_string = decode_ids(ar, src_text_field, args.src_tokenized)
-                    tgt_string = decode_ids(en, tgt_text_field, args.tgt_tokenized)
-                    hypothesis = decode_ids(hyp, tgt_text_field, args.tgt_tokenized)
+    beam_exploration = []
 
-                    sources.append(src_string)
-                    ground_truth.append(tgt_string)
-                    hypotheses.append(hypothesis)
+    for beam in range(1, 40):
+        if beam >= len(tgt_text_field.vocab):
+            break
 
-                if j == 0:
-                    for src, hyp, tgt in zip(
-                            sources[:10], hypotheses, ground_truth):
-                        logging.info("")
-                        logging.info("'%s' -> '%s' (%s)", src, hyp, tgt)
+        beam_performance = []
+        for len_norm in [0.2 * x for x in range(9)]:
+            sources = []
+            ground_truth = []
+            hypotheses = []
 
-        logging.info("")
+            for j, val_ex in enumerate(val_iter):
+                with torch.no_grad():
+                    decoded_val = model.beam_search(
+                        val_ex.ar, beam_size=beam, len_norm=len_norm)
+                    for ar, en, hyp in zip(val_ex.ar, val_ex.en, decoded_val):
+                        src_string = decode_ids(
+                            ar, src_text_field, args.src_tokenized)
+                        tgt_string = decode_ids(
+                            en, tgt_text_field, args.tgt_tokenized)
+                        hypothesis = decode_ids(
+                            hyp, tgt_text_field, args.tgt_tokenized)
 
-        wer = 1 - sum(
-            float(gt == hyp) for gt, hyp
-            in zip(ground_truth, hypotheses)) / len(ground_truth)
-        cer = char_error_rate(hypotheses, ground_truth, args.tgt_tokenized)
+                        sources.append(src_string)
+                        ground_truth.append(tgt_string)
+                        hypotheses.append(hypothesis)
 
-        logging.info("WER: %.3g", wer)
-        logging.info("CER: %.3g", cer)
-        logging.info("")
+            #wer = 1 - sum(
+            #    float(gt == hyp) for gt, hyp
+            #    in zip(ground_truth, hypotheses)) / len(ground_truth)
+            cer = char_error_rate(hypotheses, ground_truth, args.tgt_tokenized)
+            if cer < best_eval_cer:
+                best_eval_beam = beam
+                best_eval_len_norm = len_norm
+                best_eval_cer = cer
+            beam_performance.append(cer)
+        beam_exploration.append(beam_performance)
+        logging.info("Beam %d, so far best CER %f.", beam, best_cer)
+
+    with open(os.path.join(
+            experiment_dir, "beam_exploration.txt"), "w") as f_beam:
+        print(beam_exploration, file=f_beam)
+
+    logging.info(
+        "Best beam size: %d, best len norm: %f",
+        best_eval_beam, best_eval_len_norm)
+
+    for j, test_ex in enumerate(test_iter):
+        with torch.no_grad():
+            decoded_val = model.beam_search(
+                test_ex.ar,
+                beam_size=best_eval_beam,
+                len_norm=best_eval_len_norm)
+            for ar, en, hyp in zip(test_ex.ar, test_ex.en, decoded_val):
+                src_string = decode_ids(ar, src_text_field, args.src_tokenized)
+                tgt_string = decode_ids(en, tgt_text_field, args.tgt_tokenized)
+                hypothesis = decode_ids(hyp, tgt_text_field, args.tgt_tokenized)
+
+                sources.append(src_string)
+                ground_truth.append(tgt_string)
+                hypotheses.append(hypothesis)
+
+            if j == 0:
+                for src, hyp, tgt in zip(
+                        sources[:10], hypotheses, ground_truth):
+                    logging.info("")
+                    logging.info("'%s' -> '%s' (%s)", src, hyp, tgt)
+    logging.info("")
+
+    wer = 1 - sum(
+        float(gt == hyp) for gt, hyp
+        in zip(ground_truth, hypotheses)) / len(ground_truth)
+    cer = char_error_rate(hypotheses, ground_truth, args.tgt_tokenized)
+
+    logging.info("WER: %.3g", wer)
+    logging.info("CER: %.3g", cer)
+    logging.info("")
 
 
 if __name__ == "__main__":
