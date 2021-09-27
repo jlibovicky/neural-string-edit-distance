@@ -8,15 +8,15 @@ mkdir -p test_outputs
 
 # EDIT DISTANCE GENERATION ===================================================
 
-./train_transliteration_generation.py --model-type embeddings --hidden-size 16 --nll-loss 1.0 --sampled-em-loss 0.0 data/test_generation --distortion-loss 0.0 --final-state-loss 0.0 --batch-size 20 --contrastive-loss 0.0 --delay-update 2 --epochs 2 --validation-frequency 5 --em-loss 1.0 --log-directory test_outputs
+./train_transliteration_generation.py --model-type embeddings --hidden-size 16 --nll-loss 1.0 --sampled-em-loss 0.0 data/test_generation --distortion-loss 0.0 --final-state-loss 0.0 --batch-size 20 --delay-update 2 --epochs 2 --validation-frequency 5 --em-loss 1.0 --log-directory test_outputs
 
-./train_transliteration_generation.py --model-type rnn --hidden-size 16 --nll-loss 1.0 --sampled-em-loss 0.0 data/test_generation --distortion-loss 0.0 --final-state-loss 0.0 --batch-size 20 --contrastive-loss 0.0 --delay-update 2 --epochs 2 --validation-frequency 5 --em-loss 1.0 --no-enc-dec-att --log-directory test_outputs
+./train_transliteration_generation.py --model-type rnn --hidden-size 16 --nll-loss 1.0 --sampled-em-loss 0.0 data/test_generation --distortion-loss 0.0 --final-state-loss 0.0 --batch-size 20 --delay-update 2 --epochs 2 --validation-frequency 5 --em-loss 1.0 --no-enc-dec-att --log-directory test_outputs
 
-./train_transliteration_generation.py --model-type transformer --hidden-size 16 --nll-loss 1.0 --sampled-em-loss 0.0 data/test_generation --distortion-loss 0.0 --final-state-loss 0.0 --batch-size 20 --contrastive-loss 0.0 --delay-update 2 --epochs 2 --validation-frequency 5 --em-loss 1.0 --no-enc-dec-att --log-directory test_outputs
+./train_transliteration_generation.py --model-type transformer --hidden-size 16 --nll-loss 1.0 --sampled-em-loss 0.0 data/test_generation --distortion-loss 0.0 --final-state-loss 0.0 --batch-size 20 --delay-update 2 --epochs 2 --validation-frequency 5 --em-loss 1.0 --no-enc-dec-att --log-directory test_outputs
 
-./train_transliteration_generation.py --model-type rnn --hidden-size 16 --nll-loss 1.0 --sampled-em-loss 0.0 data/test_generation --distortion-loss 0.0 --final-state-loss 0.0 --batch-size 20 --contrastive-loss 0.0 --delay-update 2 --epochs 2 --validation-frequency 5 --em-loss 1.0 --log-directory test_outputs
+./train_transliteration_generation.py --model-type rnn --hidden-size 16 --nll-loss 1.0 --sampled-em-loss 0.0 data/test_generation --distortion-loss 0.0 --final-state-loss 0.0 --batch-size 20 --delay-update 2 --epochs 2 --validation-frequency 5 --em-loss 1.0 --log-directory test_outputs
 
-./train_transliteration_generation.py --model-type transformer --hidden-size 16 --nll-loss 1.0 --sampled-em-loss 0.0 data/test_generation --distortion-loss 0.0 --final-state-loss 0.0 --batch-size 20 --contrastive-loss 0.0 --delay-update 2 --epochs 2 --validation-frequency 5 --em-loss 1.0 --log-directory test_outputs
+./train_transliteration_generation.py --model-type transformer --hidden-size 16 --nll-loss 1.0 --sampled-em-loss 0.0 data/test_generation --distortion-loss 0.0 --final-state-loss 0.0 --batch-size 20 --delay-update 2 --epochs 2 --validation-frequency 5 --em-loss 1.0 --log-directory test_outputs
 
 # S2S MODELS =================================================================
 
