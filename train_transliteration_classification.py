@@ -10,6 +10,7 @@ the False label.
 import argparse
 import logging
 import os
+import time
 
 import numpy as np
 import torch
@@ -115,16 +116,28 @@ def main():
         hidden_layers=args.layers,
         attention_heads=args.attention_heads,
         share_encoders=args.share_encoders).to(device)
+    logging.info(
+        "Model parameters: %dk",
+        sum([x.reshape(-1).size(0) for x in model.parameters()]) / 1000)
 
     class_loss = nn.BCELoss()
     kl_div_loss = nn.KLDivLoss(reduction='none')
     xent_loss = nn.CrossEntropyLoss(reduction='none')
     optimizer = optim.Adam(model.parameters())
 
+    train_curve_file = open(
+        os.path.join(experiment_dir, "train_loss.tsv"), "w")
+    valid_curve_file = open(
+        os.path.join(experiment_dir, "valid_f1.tsv"), "w")
+
     step = 0
     stalled = 0
     best_f_score = 0
     best_boundary = 0.5
+    last_save_time = 0
+
+    logging.info("Start training.")
+    start_time = time.time()
     for _ in range(args.epochs):
         if stalled > args.patience:
             break
@@ -178,6 +191,7 @@ def main():
 
             optimizer.step()
             optimizer.zero_grad()
+            print(f"{step:d}\t{loss:.3g}", file=train_curve_file)
 
             if step % args.validation_frequency == args.validation_frequency - 1:
                 model.eval()
@@ -220,6 +234,8 @@ def main():
                         best_f_score = f_score
                         best_boundary = boundary
                         stalled = 0
+                        last_save_time = time.time()
+
                     else:
                         stalled += 1
 
@@ -227,11 +243,12 @@ def main():
                         logging.info("Stalled %d times (best F score %.3f)",
                                      stalled, best_f_score)
 
+                    print(f"{step:d}\t{f_score:.3g}", file=valid_curve_file)
                     logging.info("")
                 model.train()
 
     logging.info("")
-    logging.info("TRANING FINISHED, TESTING")
+    logging.info("TRANING FINISHED.")
     logging.info("")
 
     model = torch.load(model_path)

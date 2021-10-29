@@ -9,6 +9,7 @@ tab-separated source and target strings.
 import argparse
 import logging
 import os
+import time
 
 from tensorboardX import SummaryWriter
 import torch
@@ -288,9 +289,17 @@ def main():
         tgt_eos_token_id=tgt_text_field.vocab.stoi[tgt_text_field.eos_token],
         tgt_pad_token_id=tgt_text_field.vocab.stoi[tgt_text_field.pad_token],
         device=device)
+    logging.info(
+        "Model parameters: %dk",
+        sum([x.reshape(-1).size(0) for x in model.parameters()]) / 1000)
 
     nll = nn.CrossEntropyLoss().to(device)
     optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
+
+    train_curve_file = open(
+        os.path.join(experiment_dir, "train_loss.tsv"), "w")
+    valid_curve_file = open(
+        os.path.join(experiment_dir, "valid_cer.tsv"), "w")
 
     step = 0
     best_wer = 1e9
@@ -298,7 +307,10 @@ def main():
     best_cer = 1e9
     best_cer_step = 0
     stalled = 0
+    last_save_time = 0
 
+    logging.info("Start training.")
+    start_time = time.time()
     for _ in range(args.epochs):
         if stalled > args.patience:
             break
@@ -319,6 +331,7 @@ def main():
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
             optimizer.zero_grad()
+            print(f"{step:d}\t{loss:.3g}", file=train_curve_file)
 
             if step % args.validation_frequency == args.validation_frequency - 1:
                 tb_writer.add_scalar('train/nll', loss, step)
@@ -384,6 +397,9 @@ def main():
                     logging.info("Stalled %d times.", stalled)
                 else:
                     torch.save(model, model_path)
+                    last_save_time = time.time()
+
+                print(f"{step:d}\t{cer:.3g}", file=valid_curve_file)
                 logging.info("")
 
                 tb_writer.add_scalar('val/cer', cer, step)
@@ -391,11 +407,71 @@ def main():
                 tb_writer.flush()
                 model.train()
 
-    logging.info("TRAINING FINISHED, evaluating on test data")
-    logging.info("")
+    logging.info("TRAINING FINISHED.")
+    logging.info(
+        "The training took %d seconds.", last_save_time - start_time)
+    logging.info("Find best beam serch parameters.")
 
     model = torch.load(model_path)
     model.eval()
+
+    best_eval_beam = 1
+    best_eval_len_norm = 0.0
+    best_eval_cer = 10.
+
+    beam_exploration = []
+
+    for beam in range(1, 40):
+        if beam >= len(tgt_text_field.vocab):
+            break
+
+        beam_performance = []
+        for len_norm in [0.2 * x for x in range(9)]:
+            ground_truth = []
+            hypotheses = []
+            for j, val_batch in enumerate(val_iter):
+                with torch.no_grad():
+                    src_string = [
+                        decode_ids(val_ex, src_text_field,
+                                   tokenized=args.src_tokenized)
+                        for val_ex in val_batch.ar]
+                    tgt_string = [
+                        decode_ids(val_ex, tgt_text_field,
+                                   tokenized=args.tgt_tokenized)
+                        for val_ex in val_batch.en]
+
+                    decoded_val = model.beam_search(
+                        val_batch.ar,
+                        beam_size=beam,
+                        len_norm=len_norm,
+                        max_len=2 * val_batch.ar.size(1))
+
+                    hypotheses = [
+                        decode_ids(out, tgt_text_field,
+                                   tokenized=args.tgt_tokenized)
+                        for out in decoded_val[0]]
+
+                    ground_truth.extend(tgt_string)
+                    all_hypotheses.extend(hypotheses)
+
+            cer = char_error_rate(
+                all_hypotheses, ground_truth, tokenized=args.tgt_tokenized)
+            if cer < best_eval_cer:
+                best_eval_beam = beam
+                best_eval_len_norm = len_norm
+                best_eval_cer = cer
+            beam_performance.append(cer)
+
+        beam_exploration.append(beam_performance)
+        logging.info("Beam %d, so far best CER %f.", beam, best_cer)
+
+    with open(os.path.join(
+            experiment_dir, "beam_exploration.txt"), "w") as f_beam:
+        print(beam_exploration, file=f_beam)
+
+    logging.info(
+        "Best beam size: %d, best len norm: %f",
+        best_eval_beam, best_eval_len_norm)
 
     for j, test_batch in enumerate(test_iter):
         with torch.no_grad():
@@ -410,6 +486,8 @@ def main():
 
             decoded_val = model.beam_search(
                 test_batch.ar,
+                beam_size=best_eval_beam,
+                len_norm=best_eval_len_norm,
                 max_len=2 * test_batch.ar.size(1))
 
             hypotheses = [

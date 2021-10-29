@@ -332,7 +332,7 @@ def main():
             break
 
         beam_performance = []
-        for len_norm in [0.2 * x for x in range(9)]:
+        for len_norm in [0.2 * x for x in range(14)]:
             sources = []
             ground_truth = []
             hypotheses = []
@@ -353,9 +353,6 @@ def main():
                         ground_truth.append(tgt_string)
                         hypotheses.append(hypothesis)
 
-            #wer = 1 - sum(
-            #    float(gt == hyp) for gt, hyp
-            #    in zip(ground_truth, hypotheses)) / len(ground_truth)
             cer = char_error_rate(hypotheses, ground_truth, args.tgt_tokenized)
             if cer < best_eval_cer:
                 best_eval_beam = beam
@@ -363,7 +360,7 @@ def main():
                 best_eval_cer = cer
             beam_performance.append(cer)
         beam_exploration.append(beam_performance)
-        logging.info("Beam %d, so far best CER %f.", beam, best_cer)
+        logging.info("Beam %d, so far best CER %f.", beam, best_eval_cer)
 
     with open(os.path.join(
             experiment_dir, "beam_exploration.txt"), "w") as f_beam:
@@ -402,7 +399,6 @@ def main():
 
     logging.info("WER: %.3g", wer)
     logging.info("CER: %.3g", cer)
-    logging.info("")
 
 
 if __name__ == "__main__":

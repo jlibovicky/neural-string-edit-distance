@@ -35,7 +35,7 @@ def load_transliteration_data(
 
     train_iter, val_iter, test_iter = data.Iterator.splits(
         (train_data, val_data, test_data),
-        batch_sizes=(batch_size, batch_size, 32),
+        batch_sizes=(batch_size, 16, 16),
         shuffle=True, device=device, sort_key=lambda x: len(x.ar))
 
     return (src_text_field, tgt_text_field, train_iter, val_iter, test_iter)
@@ -56,7 +56,7 @@ def decode_ids(ids_list, vocab, tokenized=False):
     return separator.join(real_chars)
 
 
-def char_error_rate(hyps, refs, tokenized=False):
+def char_error_rate(hyps, refs, tokenized=False, average=True):
     cers = []
     for hyp, ref in zip(hyps, refs):
         if tokenized:
@@ -66,4 +66,6 @@ def char_error_rate(hyps, refs, tokenized=False):
             # TODO this is a BUG and needs to be fixed
             continue
         cers.append(edit_ops / len(ref))
-    return sum(cers) / len(cers)
+    if average:
+        return sum(cers) / len(cers)
+    return cers
